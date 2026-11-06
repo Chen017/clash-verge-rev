@@ -1,5 +1,7 @@
 # Clash Verge Personal
 
+完整中文需求与维护清单见 [个人 Fork 定制说明](https://github.com/Chen017/mihomo/blob/codex/window-builds/CUSTOMIZATIONS.md)。后续升级请保留列出的配置语义和签名身份；移除补丁前应先验证上游已有等价实现。
+
 Unofficial Windows amd64 builds of the latest stable Clash Verge Rev, bundling Chen017/mihomo with independent XHTTP download routing and VLESS 0-RTT ticket recovery. Only one NSIS installer is published. No ARM, 32-bit, MSI, portable or fixed-WebView variants are built.
 
 Install the personal installer once, choosing the current installation directory. Export a configuration backup before migration. The application identifier and configuration directory remain `io.github.clash-verge-rev.clash-verge-rev`; existing providers and selections are retained. The personal stable core is selected automatically, including migration from the old Alpha selection. The two internal core filenames contain the same verified personal binary for installer/service compatibility.

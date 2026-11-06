@@ -1,3 +1,5 @@
+> 定制功能与升级约束见：[Chen017 个人 Fork 定制说明](https://github.com/Chen017/mihomo/blob/codex/window-builds/CUSTOMIZATIONS.md)（含 XHTTP H2 窗口、分路、零 RTT 和各仓库分工）。
+
 > **Clash Verge Personal**: Windows amd64 only, with a pinned personal split-route core and signed in-app updates. [Downloads](https://github.com/Chen017/clash-verge-rev/releases/latest) · [Migration and maintenance](.personal/README.md). Unofficial build; upstream documentation follows.
 
 <h1 align="center">
