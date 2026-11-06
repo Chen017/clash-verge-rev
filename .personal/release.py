@@ -136,7 +136,7 @@ def package():
     if header[:4] != b'PE\0\0' or int.from_bytes(header[4:6], 'little') != 0x8664:
         raise RuntimeError('App payload is not Windows amd64')
     DIST.mkdir(exist_ok=True)
-    installer = DIST / installers[0].name
+    installer = DIST / f'Clash.Verge_{plan["version"]}_x64-setup.exe'
     shutil.copy2(installers[0], installer)
     signature = DIST / (installer.name + '.sig')
     shutil.copy2(Path(str(installers[0]) + '.sig'), signature)
