@@ -1,0 +1,57 @@
+{
+  "tag": "v1.19.33-window.3f27ef39.f841491f",
+  "url": "https://github.com/Chen017/mihomo/releases/download/v1.19.33-window.3f27ef39.f841491f/mihomo-windows-amd64-v1.19.33-window.3f27ef39.f841491f.zip",
+  "sha256": "95cedf2c859b9d3e8b839f3cad52a4abf63375c561b4bba6829d8396bf44ec70",
+  "provenance": {
+    "upstream_repository": "MetaCubeX/mihomo",
+    "upstream_tag": "v1.19.33",
+    "upstream_commit": "3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8",
+    "patch_sha256": "f841491f22b1db831eb6e70a6d00d92315095fb536ec4f2af06acf69b4a50089",
+    "maintenance_commit": "632b448f0e7de6a00094f17fc06b3fd36b7ecd4d",
+    "version": "v1.19.33-window.3f27ef39.f841491f",
+    "build_needed": true,
+    "patches": [
+      {
+        "name": "patches/compat/urltest-warm-fallback-upstream.patch",
+        "sha256": "008ddf078884d07f871e86b59273a6cd65529b774d6a97352303913af942042e",
+        "mode": "local patch"
+      },
+      {
+        "name": "patches/xhttp-h2-window.patch",
+        "sha256": "507a00430d4002aab84ced3a836bf5592a553b923b9d2528c2d0690ac20b5e42",
+        "mode": "local patch"
+      },
+      {
+        "name": "patches/xhttp-nat-split.patch",
+        "sha256": "641c4a95f52d2ea54dc86212152ec10bb7397c5a76d1b9877096ba9711b8d881",
+        "mode": "local patch"
+      }
+    ],
+    "modified_paths": [
+      "adapter/adapter.go",
+      "adapter/outbound/base.go",
+      "adapter/outbound/vless.go",
+      "adapter/outbound/vless_xhttp_dialer_test.go",
+      "adapter/outbound/vless_xhttp_window_test.go",
+      "adapter/provider/dialer_provider.go",
+      "adapter/provider/dialer_provider_test.go",
+      "adapter/provider/parser.go",
+      "adapter/provider/provider.go",
+      "adapter/urltest_fallback_test.go",
+      "component/proxydialer/byname.go",
+      "component/proxydialer/byname_test.go",
+      "config/config.go",
+      "config/utils_test.go",
+      "docs/config.yaml",
+      "hub/route/proxies.go",
+      "hub/route/proxies_delay_test.go",
+      "transport/vless/encryption/common.go",
+      "transport/vless/encryption/ticket_test.go",
+      "transport/xhttp/client.go",
+      "transport/xhttp/window_test.go"
+    ],
+    "source_commit": "3371e703153c1b7b7dfb7807d876a0ae9009cc19",
+    "go_version": "go version go1.26.10 linux/amd64",
+    "build_time_utc": "2026-11-05T13:40:07Z"
+  }
+}
