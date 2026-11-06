@@ -78,8 +78,8 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/.personal/work/source/target
         run: |
-          cargo test --release --target x86_64-pc-windows-msvc -p clash-verge --lib personal_update_tests
-          cargo test --release --target x86_64-pc-windows-msvc -p clash-verge --lib feat::core_upgrade::tests
+          cargo test --release --features clippy --target x86_64-pc-windows-msvc -p clash-verge --lib personal_update_tests
+          cargo test --release --features clippy --target x86_64-pc-windows-msvc -p clash-verge --lib feat::core_upgrade::tests
       - name: Verify real installer signature and publish complete release
         if: steps.prepare.outputs.needed == 'true'
         run: |
