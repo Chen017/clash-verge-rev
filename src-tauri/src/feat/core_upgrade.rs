@@ -275,7 +275,7 @@ fn verify_package_checksum(package: &[u8], checksums: &str, name: &str) -> Resul
         let hash = fields.next()?;
         (fields.next()?.trim_start_matches('*') == name).then_some(hash)
     }).context("core archive is missing from release checksums")?;
-    let actual = format!("{:x}", Sha256::digest(package));
+    let actual = Sha256::digest(package).iter().map(|byte| format!("{byte:02x}")).collect::<String>();
     anyhow::ensure!(actual.eq_ignore_ascii_case(expected), "core archive checksum mismatch");
     Ok(())
 }
@@ -463,7 +463,7 @@ mod tests {
 
     #[test]
     fn personal_archive_checksum_rejects_corruption_and_wrong_asset() {
-        let hash = format!("{:x}", Sha256::digest(b"verified core"));
+        let hash = Sha256::digest(b"verified core").iter().map(|byte| format!("{byte:02x}")).collect::<String>();
         let checksums = format!("{hash}  core.zip\n");
         assert!(verify_package_checksum(b"verified core", &checksums, "core.zip").is_ok());
         assert!(verify_package_checksum(b"corrupt", &checksums, "core.zip").is_err());

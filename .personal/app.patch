@@ -470,7 +470,7 @@ index c017582eb803c7073673bce2b31c72f94751bcf4..438a215450bfa85eb38e5d465e041cd3
  
  /// Maps UI language to one of the three NSIS translations, defaulting to English.
 diff --git a/src-tauri/src/feat/core_upgrade.rs b/src-tauri/src/feat/core_upgrade.rs
-index dfb415aa0e24a171ef4343d42ccb086a5a377233..c8af7e05d9c60e190b7c5764ad41d24803d8de18 100644
+index dfb415aa0e24a171ef4343d42ccb086a5a377233..014db2f55a7370e60ff0ddcd8114b95e575b463a 100644
 --- a/src-tauri/src/feat/core_upgrade.rs
 +++ b/src-tauri/src/feat/core_upgrade.rs
 @@ -13,6 +13,7 @@ use crate::{
@@ -643,7 +643,7 @@ index dfb415aa0e24a171ef4343d42ccb086a5a377233..c8af7e05d9c60e190b7c5764ad41d248
 +        let hash = fields.next()?;
 +        (fields.next()?.trim_start_matches('*') == name).then_some(hash)
 +    }).context("core archive is missing from release checksums")?;
-+    let actual = format!("{:x}", Sha256::digest(package));
++    let actual = Sha256::digest(package).iter().map(|byte| format!("{byte:02x}")).collect::<String>();
 +    anyhow::ensure!(actual.eq_ignore_ascii_case(expected), "core archive checksum mismatch");
 +    Ok(())
  }
@@ -659,7 +659,7 @@ index dfb415aa0e24a171ef4343d42ccb086a5a377233..c8af7e05d9c60e190b7c5764ad41d248
 +
 +    #[test]
 +    fn personal_archive_checksum_rejects_corruption_and_wrong_asset() {
-+        let hash = format!("{:x}", Sha256::digest(b"verified core"));
++        let hash = Sha256::digest(b"verified core").iter().map(|byte| format!("{byte:02x}")).collect::<String>();
 +        let checksums = format!("{hash}  core.zip\n");
 +        assert!(verify_package_checksum(b"verified core", &checksums, "core.zip").is_ok());
 +        assert!(verify_package_checksum(b"corrupt", &checksums, "core.zip").is_err());
