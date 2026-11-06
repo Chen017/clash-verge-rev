@@ -13,6 +13,7 @@ use crate::{
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use clash_verge_logging::{Type, logging};
+use sha2::{Digest as _, Sha256};
 use std::{
     env::current_exe,
     ffi::OsStr,
@@ -22,9 +23,8 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-const RELEASE_VERSION_URL: &str = "https://github.com/MetaCubeX/mihomo/releases/latest/download/version.txt";
-const ALPHA_BASE_URL: &str = "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha";
-const RELEASE_DOWNLOAD_URL: &str = "https://github.com/MetaCubeX/mihomo/releases/download";
+const RELEASE_VERSION_URL: &str = "https://github.com/Chen017/mihomo/releases/latest/download/version.txt";
+const RELEASE_DOWNLOAD_URL: &str = "https://github.com/Chen017/mihomo/releases/download";
 const VERSION_TIMEOUT_SECS: u64 = 20;
 const PACKAGE_TIMEOUT_SECS: u64 = 300;
 /// Well above any real core package, low enough that a wrong response cannot exhaust memory.
@@ -44,7 +44,6 @@ pub async fn upgrade_core(force: bool) -> Result<CoreUpgradeReport> {
     let _serialized = UPGRADE_LOCK.lock().await;
     let core = Config::verge().await.latest_arc().get_valid_clash_core();
     tracing::Span::current().record("core", tracing::field::display(&core));
-    let alpha = core.ends_with("-alpha");
     let target = managed_core_path(&core)?;
 
     // A core already broken by the in-place updater cannot report a version; upgrading is the repair.
@@ -53,17 +52,17 @@ pub async fn upgrade_core(force: bool) -> Result<CoreUpgradeReport> {
         std::string::String::new()
     });
 
-    let (proxy, latest) = resolve_latest_version(alpha).await?;
+    let (proxy, latest) = resolve_latest_version().await?;
     let span = tracing::Span::current();
     span.record("from", tracing::field::display(&installed));
     span.record("to", tracing::field::display(&latest));
     logging!(debug, Type::Core, "core upgrade: latest version resolved via {proxy:?}");
 
-    if !force && installed == latest {
+    if !force && installed == latest && running_core_version().await.is_ok_and(|v| v == latest) {
         return Ok(CoreUpgradeReport { upgraded: false });
     }
 
-    let package = download_package(proxy, alpha, &latest).await?;
+    let package = download_package(proxy, &latest).await?;
     let staged = stage_core(&target, &package, &latest)?;
 
     // A hard link keeps the previous core reachable without touching the inode the running
@@ -98,6 +97,15 @@ pub async fn upgrade_core(force: bool) -> Result<CoreUpgradeReport> {
             .restart_core()
             .await
             .context("core replaced but failed to restart");
+        if result.is_ok() {
+            result = match running_core_version().await {
+                Ok(version) if version == latest => Ok(()),
+                other => {
+                    let _ = CoreManager::global().stop_core().await;
+                    Err(anyhow!("running core does not match {latest}: {other:?}"))
+                }
+            };
+        }
     }
 
     if let Err(error) = result {
@@ -172,58 +180,17 @@ fn managed_core_path(core: &str) -> Result<PathBuf> {
 }
 
 /// Pins the package to the resolved version, so a release moving on mid-upgrade cannot 404.
-fn package_url(alpha: bool, version: &str) -> Result<std::string::String> {
-    let asset = asset_base_name(alpha)?;
-    let extension = if cfg!(windows) { "zip" } else { "gz" };
-    Ok(if alpha {
-        format!("{ALPHA_BASE_URL}/{asset}-{version}.{extension}")
-    } else {
-        format!("{RELEASE_DOWNLOAD_URL}/{version}/{asset}-{version}.{extension}")
-    })
-}
-
-/// Mirrors the asset map in `scripts/prebuild.mjs` so an upgrade keeps the build variant
-/// the bundled sidecar was taken from.
-fn asset_base_name(alpha: bool) -> Result<&'static str> {
-    let arch = std::env::consts::ARCH;
-    let unsupported = || anyhow!("no mihomo release asset for {}-{arch}", std::env::consts::OS);
-
-    let name = if cfg!(target_os = "windows") {
-        match arch {
-            "x86_64" => "mihomo-windows-amd64-v2",
-            "x86" => "mihomo-windows-386",
-            "aarch64" => "mihomo-windows-arm64",
-            _ => return Err(unsupported()),
-        }
-    } else if cfg!(target_os = "macos") {
-        match arch {
-            "x86_64" if alpha => "mihomo-darwin-amd64-v1-go122",
-            "x86_64" => "mihomo-darwin-amd64-v2-go122",
-            "aarch64" => "mihomo-darwin-arm64-go122",
-            _ => return Err(unsupported()),
-        }
-    } else {
-        match arch {
-            "x86_64" => "mihomo-linux-amd64-v2",
-            "x86" => "mihomo-linux-386",
-            "aarch64" => "mihomo-linux-arm64",
-            "arm" => "mihomo-linux-armv7",
-            "riscv64" => "mihomo-linux-riscv64",
-            "loongarch64" => "mihomo-linux-loong64",
-            _ => return Err(unsupported()),
-        }
-    };
-    Ok(name)
+fn package_url(version: &str) -> Result<std::string::String> {
+    if !cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        bail!("personal core upgrades support Windows amd64 only");
+    }
+    Ok(format!("{RELEASE_DOWNLOAD_URL}/{version}/mihomo-windows-amd64-{version}.zip"))
 }
 
 /// Returns the proxy that reached GitHub so the package download reuses it.
-#[tracing::instrument(skip_all, level = "debug", fields(alpha))]
-async fn resolve_latest_version(alpha: bool) -> Result<(ProxyType, std::string::String)> {
-    let url = if alpha {
-        format!("{ALPHA_BASE_URL}/version.txt")
-    } else {
-        RELEASE_VERSION_URL.to_owned()
-    };
+#[tracing::instrument(skip_all, level = "debug")]
+async fn resolve_latest_version() -> Result<(ProxyType, std::string::String)> {
+    let url = RELEASE_VERSION_URL.to_owned();
     let mut last_error = None;
 
     for proxy in [ProxyType::Localhost, ProxyType::System, ProxyType::None] {
@@ -278,14 +245,39 @@ fn is_usable_version(version: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
-async fn download_package(proxy: ProxyType, alpha: bool, version: &str) -> Result<Vec<u8>> {
-    let url = package_url(alpha, version)?;
+async fn download_package(proxy: ProxyType, version: &str) -> Result<Vec<u8>> {
+    let url = package_url(version)?;
     logging!(info, Type::Core, "core upgrade: downloading {url}");
 
-    NetworkManager::new()
+    let checksums_url = format!("{RELEASE_DOWNLOAD_URL}/{version}/checksums.txt");
+    let checksums = NetworkManager::new()
+        .get_bytes(&checksums_url, proxy, Some(VERSION_TIMEOUT_SECS), 64 * 1024)
+        .await?;
+    let package = NetworkManager::new()
         .get_bytes(&url, proxy, Some(PACKAGE_TIMEOUT_SECS), MAX_PACKAGE_BYTES)
         .await
-        .with_context(|| format!("failed to download {url}"))
+        .with_context(|| format!("failed to download {url}"))?;
+    verify_package_checksum(&package, &String::from_utf8(checksums)?, url.rsplit('/').next().unwrap_or_default())?;
+    Ok(package)
+}
+
+async fn running_core_version() -> Result<String> {
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(VERSION_TIMEOUT_SECS),
+        crate::core::handle::Handle::mihomo().get_version(),
+    ).await.context("running core version probe timed out")??;
+    Ok(response.version)
+}
+
+fn verify_package_checksum(package: &[u8], checksums: &str, name: &str) -> Result<()> {
+    let expected = checksums.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let hash = fields.next()?;
+        (fields.next()?.trim_start_matches('*') == name).then_some(hash)
+    }).context("core archive is missing from release checksums")?;
+    let actual = format!("{:x}", Sha256::digest(package));
+    anyhow::ensure!(actual.eq_ignore_ascii_case(expected), "core archive checksum mismatch");
+    Ok(())
 }
 
 /// A staged core that is removed unless publishing renamed it away.
@@ -466,7 +458,17 @@ fn read_core_version(path: &Path) -> Result<std::string::String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_usable_version, package_url};
+    use super::{is_usable_version, package_url, verify_package_checksum};
+    use sha2::{Digest as _, Sha256};
+
+    #[test]
+    fn personal_archive_checksum_rejects_corruption_and_wrong_asset() {
+        let hash = format!("{:x}", Sha256::digest(b"verified core"));
+        let checksums = format!("{hash}  core.zip\n");
+        assert!(verify_package_checksum(b"verified core", &checksums, "core.zip").is_ok());
+        assert!(verify_package_checksum(b"corrupt", &checksums, "core.zip").is_err());
+        assert!(verify_package_checksum(b"verified core", &checksums, "other.zip").is_err());
+    }
 
     #[test]
     fn only_plain_version_tokens_reach_the_package_url() {
@@ -487,13 +489,11 @@ mod tests {
 
     #[test]
     fn package_urls_pin_the_resolved_version() {
-        let release = package_url(false, "v1.19.30").unwrap_or_default();
-        let alpha = package_url(true, "alpha-c0e43eb").unwrap_or_default();
+        let release = package_url("v1.19.30").unwrap_or_default();
         assert!(release.contains("/releases/download/v1.19.30/"), "{release}");
         assert!(
             release.ends_with("-v1.19.30.gz") || release.ends_with("-v1.19.30.zip"),
             "{release}"
         );
-        assert!(alpha.contains("/Prerelease-Alpha/"), "{alpha}");
     }
 }

@@ -1,0 +1,91 @@
+name: Personal Windows amd64
+on:
+  schedule:
+    - cron: '43 */6 * * *'
+  workflow_dispatch:
+  push:
+    branches: [codex/personal-builds]
+    paths: ['.personal/**', '.github/workflows/personal-windows.yml']
+permissions:
+  contents: write
+concurrency:
+  group: personal-windows-release
+  cancel-in-progress: false
+jobs:
+  release:
+    if: github.repository == 'Chen017/clash-verge-rev'
+    runs-on: windows-latest
+    timeout-minutes: 150
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HUSKY: '0'
+      CARGO_INCREMENTAL: '0'
+      NODE_OPTIONS: '--max-old-space-size=4096'
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Prepare stable upstream and pinned personal core
+        id: prepare
+        run: |
+          python -m unittest discover -s .personal -p 'test_*.py'
+          python .personal/release.py prepare
+      - uses: actions/setup-node@v7.1.0
+        if: steps.prepare.outputs.needed == 'true'
+        with:
+          node-version: ${{ steps.prepare.outputs.node }}
+      - uses: pnpm/action-setup@v6
+        if: steps.prepare.outputs.needed == 'true'
+        with:
+          package_json_file: .personal/work/source/package.json
+          run_install: false
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.prepare.outputs.needed == 'true'
+        with:
+          toolchain: ${{ steps.prepare.outputs.rust }}
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        if: steps.prepare.outputs.needed == 'true'
+        with:
+          workspaces: .personal/work/source -> target
+          cache-on-failure: true
+      - name: Stage checksum-verified core and upstream service resources
+        if: steps.prepare.outputs.needed == 'true'
+        working-directory: .personal/work/source
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm prebuild x86_64-pc-windows-msvc
+          rustfmt --edition 2024 src-tauri/src/core/updater.rs src-tauri/src/feat/core_upgrade.rs
+      - name: Build one signed Windows amd64 NSIS installer
+        if: steps.prepare.outputs.needed == 'true'
+        working-directory: .personal/work/source
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/.personal/work/source/target
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if (!$env:TAURI_SIGNING_PRIVATE_KEY -or !$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) { throw 'Permanent updater signing secrets are required' }
+          pnpm exec tauri build --target x86_64-pc-windows-msvc --bundles nsis
+      - name: Check update ordering and core archive integrity
+        if: steps.prepare.outputs.needed == 'true'
+        working-directory: .personal/work/source
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/.personal/work/source/target
+        run: |
+          cargo test --release --target x86_64-pc-windows-msvc -p clash-verge --lib personal_update_tests
+          cargo test --release --target x86_64-pc-windows-msvc -p clash-verge --lib feat::core_upgrade::tests
+      - name: Verify real installer signature and publish complete release
+        if: steps.prepare.outputs.needed == 'true'
+        run: |
+          python .personal/release.py package
+          python .personal/release.py publish
+      - uses: actions/upload-artifact@v7.0.2
+        if: failure()
+        with:
+          name: windows-failure-evidence
+          path: |
+            .personal/work/plan.json
+            .personal/work/source/target/x86_64-pc-windows-msvc/release/bundle/nsis/*
+          include-hidden-files: true
+          retention-days: 7
