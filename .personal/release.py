@@ -23,11 +23,11 @@ CORE = 'Chen017/mihomo'
 
 
 def run(*args, cwd=ROOT, capture=False):
-    return subprocess.check_output(args, cwd=cwd, text=True).strip() if capture else subprocess.check_call(args, cwd=cwd)
+    return subprocess.check_output(args, cwd=cwd, text=True, encoding='utf-8').strip() if capture else subprocess.check_call(args, cwd=cwd)
 
 
 def api(path, missing=False):
-    result = subprocess.run(['gh', 'api', path], capture_output=True, text=True)
+    result = subprocess.run(['gh', 'api', path], capture_output=True, text=True, encoding='utf-8')
     if result.returncode:
         if missing and '404' in result.stderr:
             return None
