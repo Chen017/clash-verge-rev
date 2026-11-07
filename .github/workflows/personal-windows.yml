@@ -5,22 +5,36 @@ on:
   workflow_dispatch:
   push:
     branches: [codex/personal-builds]
+    paths: ['.personal/**', '!.personal/*.md', '.github/workflows/personal-windows.yml']
+  pull_request:
+    branches: [codex/personal-builds]
     paths: ['.personal/**', '.github/workflows/personal-windows.yml']
 permissions:
-  contents: write
-concurrency:
-  group: personal-windows-release
-  cancel-in-progress: false
+  contents: read
 jobs:
+  check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 -B -m unittest discover -s .personal -p 'test_*.py' -v
+      - run: node --check .personal/core.mjs
   release:
-    if: github.repository == 'Chen017/clash-verge-rev'
+    if: github.event_name != 'pull_request' && github.repository == 'Chen017/clash-verge-rev' && github.ref == 'refs/heads/codex/personal-builds'
+    permissions:
+      contents: write
+    concurrency:
+      group: personal-windows-release
+      cancel-in-progress: false
     runs-on: windows-latest
     timeout-minutes: 150
     defaults:
       run:
         shell: bash
     env:
-      GH_TOKEN: ${{ github.token }}
       HUSKY: '0'
       CARGO_INCREMENTAL: '0'
       PYTHONUTF8: '1'
@@ -28,11 +42,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          fetch-depth: 0
+          persist-credentials: false
       - name: Prepare stable upstream and pinned personal core
         id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          python -m unittest discover -s .personal -p 'test_*.py'
+          python -B -m unittest discover -s .personal -p 'test_*.py' -v
           python .personal/release.py prepare
       - uses: actions/setup-node@v7.1.0
         if: steps.prepare.outputs.needed == 'true'
@@ -42,6 +58,8 @@ jobs:
         if: steps.prepare.outputs.needed == 'true'
         with:
           package_json_file: .personal/work/source/package.json
+          cache: true
+          cache_dependency_path: .personal/work/source/pnpm-lock.yaml
           run_install: false
       - uses: dtolnay/rust-toolchain@stable
         if: steps.prepare.outputs.needed == 'true'
@@ -80,10 +98,17 @@ jobs:
         run: |
           cargo test --release --features clippy --target x86_64-pc-windows-msvc -p clash-verge --lib personal_update_tests
           cargo test --release --features clippy --target x86_64-pc-windows-msvc -p clash-verge --lib feat::core_upgrade::tests
-      - name: Verify real installer signature and publish complete release
+      - name: Verify and package the signed installer
         if: steps.prepare.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .personal/release.py package
+      - name: Publish the complete release
+        if: steps.prepare.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          python .personal/release.py package
+          gh auth setup-git --hostname github.com
           python .personal/release.py publish
       - uses: actions/upload-artifact@v7.0.2
         if: failure()

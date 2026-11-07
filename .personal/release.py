@@ -61,41 +61,98 @@ def next_build(refs):
                     if (match := re.fullmatch(r'refs/tags/v\d+\.\d+\.\d+-personal\.(\d+)', ref['ref']))]]) + 1
 
 
+def upstream_revision(repository, tag):
+    ref = f'refs/tags/{tag}'
+    result = run(
+        'git', 'ls-remote', '--exit-code', '--tags', repository, ref, f'{ref}^{{}}', capture=True,
+    )
+    refs = {}
+    for line in result.splitlines():
+        revision, name = line.split('\t', 1)
+        refs[name] = revision
+    return refs.get(f'{ref}^{{}}') or refs[ref]
+
+
+def core_archive_checksum(checksums, asset_name):
+    matches = []
+    for line in checksums.splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[1].removeprefix('*') == asset_name:
+            matches.append(fields[0].lower())
+    if len(matches) != 1 or not re.fullmatch(r'[0-9a-f]{64}', matches[0]):
+        raise RuntimeError(f'Expected one SHA-256 entry for {asset_name} in checksums.txt')
+    return matches[0]
+
+
+def installer_name(version):
+    return f'Clash.Verge_{version}_x64-setup.exe'
+
+
+def release_asset_names(version):
+    name = installer_name(version)
+    return {name, f'{name}.sig', 'update.json', 'manifest.json', 'SHA256SUMS'}
+
+
+def release_assets_complete(tag, assets):
+    return (
+        {asset['name'] for asset in assets} == release_asset_names(tag.removeprefix('v'))
+        and all(asset.get('state') == 'uploaded' and asset['size'] > 0
+                and re.fullmatch(r'sha256:[0-9a-f]{64}', asset.get('digest') or '') for asset in assets)
+    )
+
+
+def maintenance_digest():
+    files = sorted(ROOT / name for name in (
+        '.personal/app.patch', '.personal/core.mjs', '.personal/release.py', '.github/workflows/personal-windows.yml',
+    ))
+    digest = hashlib.sha256()
+    for path in files:
+        digest.update(path.relative_to(ROOT).as_posix().encode() + b'\0' + path.read_bytes())
+    return digest.hexdigest()
+
+
 def prepare():
     WORK.mkdir(parents=True, exist_ok=True)
     upstream = api(f'repos/{UPSTREAM}/releases/latest')
     tag = upstream['tag_name']
     if upstream['draft'] or upstream['prerelease'] or not re.fullmatch(r'v\d+\.\d+\.\d+', tag):
         raise RuntimeError('Expected an official stable app release')
-    run('git', 'fetch', '--no-tags', f'https://github.com/{UPSTREAM}.git', f'refs/tags/{tag}')
-    revision = run('git', 'rev-parse', 'FETCH_HEAD^{commit}', capture=True)
+    upstream_repository = f'https://github.com/{UPSTREAM}.git'
+    revision = upstream_revision(upstream_repository, tag)
     core = api(f'repos/{CORE}/releases/latest')
     if core['draft'] or core['prerelease']:
         raise RuntimeError('Expected a published personal core')
     asset_name = f'mihomo-windows-amd64-{core["tag_name"]}.zip'
     asset = next(a for a in core['assets'] if a['name'] == asset_name)
     checksums = read_url(next(a['browser_download_url'] for a in core['assets'] if a['name'] == 'checksums.txt')).decode()
-    checksum = next(line.split()[0] for line in checksums.splitlines() if line.split()[-1] == asset_name)
+    checksum = core_archive_checksum(checksums, asset_name)
     if asset.get('digest') != f'sha256:{checksum}':
         raise RuntimeError('Core release checksum differs from GitHub asset digest')
-    lock = dict(tag=core['tag_name'], url=asset['browser_download_url'], sha256=checksum,
-                provenance=json.loads(read_url(next(a['browser_download_url'] for a in core['assets'] if a['name'] == 'provenance.json'))))
-    files = sorted([*ROOT.glob('.personal/*.py'), *ROOT.glob('.personal/*.mjs'),
-                    *ROOT.glob('.personal/*.patch'), *ROOT.glob('.github/workflows/personal*.yml')])
-    digest = hashlib.sha256()
-    for path in files:
-        digest.update(path.relative_to(ROOT).as_posix().encode() + b'\0' + path.read_bytes())
-    identity = dict(upstream_commit=revision, core_tag=lock['tag'], core_sha256=checksum, inputs_sha256=digest.hexdigest())
+    identity = dict(upstream_commit=revision, core_tag=core['tag_name'], core_sha256=checksum,
+                    inputs_sha256=maintenance_digest())
     previous = api(f'repos/{REPO}/releases/latest', missing=True)
-    if previous and any(a['name'] == 'manifest.json' for a in previous['assets']):
-        last = json.loads(read_url(next(a['browser_download_url'] for a in previous['assets'] if a['name'] == 'manifest.json')))
-        if all(last.get(key) == value for key, value in identity.items()):
+    if previous and release_assets_complete(previous['tag_name'], previous['assets']):
+        raw_manifest = read_url(next(a['browser_download_url'] for a in previous['assets'] if a['name'] == 'manifest.json'))
+        try:
+            last = json.loads(raw_manifest)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            last = None
+        if isinstance(last, dict) and all(last.get(key) == value for key, value in identity.items()):
             outputs(needed=False)
             print('Stable app, personal core and maintenance inputs unchanged; no rebuild required.')
             return
-    number = next_build(api(f'repos/{REPO}/git/matching-refs/tags/v'))
     if SOURCE.exists():
         raise RuntimeError('Expected a fresh checkout; existing build source is preserved')
+    number = next_build(api(f'repos/{REPO}/git/matching-refs/tags/v'))
+    lock = dict(tag=core['tag_name'], url=asset['browser_download_url'], sha256=checksum,
+                provenance=json.loads(read_url(next(a['browser_download_url'] for a in core['assets'] if a['name'] == 'provenance.json'))))
+    maintenance_commit = run('git', 'rev-parse', 'HEAD', capture=True)
+    if run('git', 'rev-parse', '--is-shallow-repository', capture=True) == 'true':
+        # A three-way patch needs the original blobs reachable from the maintenance history.
+        run('git', 'fetch', '--unshallow', '--no-tags', 'origin', maintenance_commit)
+    run('git', 'fetch', '--no-tags', upstream_repository, f'refs/tags/{tag}')
+    if run('git', 'rev-parse', 'FETCH_HEAD^{commit}', capture=True) != revision:
+        raise RuntimeError(f'Upstream tag {tag} changed during preparation; run again')
     run('git', 'worktree', 'add', '--detach', str(SOURCE), revision)
     patch = str(ROOT / '.personal/app.patch')
     if subprocess.run(['git', 'apply', '--check', patch], cwd=SOURCE, capture_output=True).returncode == 0:
@@ -107,23 +164,24 @@ def prepare():
     version = f'{tag[1:]}-personal.{number}'
     for name in ['package.json', 'src-tauri/tauri.conf.json']:
         path = SOURCE / name
-        content = path.read_text()
+        content = path.read_text(encoding='utf-8')
         path.write_text(re.sub(r'"version": "[^"]+"', f'"version": "{version}"', content, count=1), encoding='utf-8')
     path = SOURCE / 'src-tauri/Cargo.toml'
-    path.write_text(re.sub(r'^version = "[^"]+"', f'version = "{version}"', path.read_text(), count=1, flags=re.M), encoding='utf-8')
-    toolchain = tomllib.loads((SOURCE / 'rust-toolchain.toml').read_text())['toolchain']['channel']
-    versions = dict(line.split() for line in (SOURCE / '.tool-versions').read_text().splitlines() if line.strip())
+    content = path.read_text(encoding='utf-8')
+    path.write_text(re.sub(r'^version = "[^"]+"', f'version = "{version}"', content, count=1, flags=re.M), encoding='utf-8')
+    toolchain = tomllib.loads((SOURCE / 'rust-toolchain.toml').read_text(encoding='utf-8'))['toolchain']['channel']
+    versions = dict(line.split() for line in (SOURCE / '.tool-versions').read_text(encoding='utf-8').splitlines() if line.strip())
     node = versions['nodejs']
     plan = dict(**identity, version=version, tag=f'v{version}', build_number=number,
                 upstream_tag=tag, upstream_repository=UPSTREAM, core=lock,
-                maintenance_commit=run('git', 'rev-parse', 'HEAD', capture=True), rust_version=toolchain, node_version=node)
+                maintenance_commit=maintenance_commit, rust_version=toolchain, node_version=node)
     write_json(WORK / 'plan.json', plan)
     outputs(needed=True, rust=toolchain, node=node)
     print(f'Prepared {plan["tag"]}; Windows amd64 only; core {lock["tag"]}.')
 
 
 def package():
-    plan = json.loads((WORK / 'plan.json').read_text())
+    plan = json.loads((WORK / 'plan.json').read_bytes())
     installers = list((SOURCE / 'target/x86_64-pc-windows-msvc/release/bundle/nsis').glob('*-setup.exe'))
     if len(installers) != 1:
         raise RuntimeError(f'Expected exactly one NSIS installer, got {len(installers)}')
@@ -135,8 +193,8 @@ def package():
         header = stream.read(6)
     if header[:4] != b'PE\0\0' or int.from_bytes(header[4:6], 'little') != 0x8664:
         raise RuntimeError('App payload is not Windows amd64')
-    DIST.mkdir(exist_ok=True)
-    installer = DIST / f'Clash.Verge_{plan["version"]}_x64-setup.exe'
+    DIST.mkdir()
+    installer = DIST / installer_name(plan['version'])
     shutil.copy2(installers[0], installer)
     signature = DIST / (installer.name + '.sig')
     shutil.copy2(Path(str(installers[0]) + '.sig'), signature)
@@ -145,10 +203,10 @@ def package():
         run('git', '-c', 'user.name=Chen017', '-c', 'user.email=github-actions[bot]@users.noreply.github.com',
             'commit', '-m', f'build: {plan["tag"]} with pinned personal Mihomo', cwd=SOURCE)
     plan['source_commit'] = run('git', 'rev-parse', 'HEAD', cwd=SOURCE, capture=True)
-    config = json.loads((SOURCE / 'src-tauri/tauri.conf.json').read_text())
+    config = json.loads((SOURCE / 'src-tauri/tauri.conf.json').read_bytes())
     verify_signature(installer, signature, config['plugins']['updater']['pubkey'], plan['version'])
     url = f'https://github.com/{REPO}/releases/download/{plan["tag"]}/{installer.name}'
-    platform = dict(url=url, signature=signature.read_text().strip())
+    platform = dict(url=url, signature=signature.read_text(encoding='ascii').strip())
     write_json(DIST / 'update.json', dict(version=plan['version'], notes=f'Stable {plan["upstream_tag"]}; personal split-route core {plan["core_tag"]}.',
                pub_date=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
                platforms={'windows-x86_64': platform, 'windows-x86_64-nsis': platform}))
@@ -170,7 +228,7 @@ def verify_signature(installer, signature, public_key, version):
     key = WORK / 'updater.pub'
     sig = WORK / 'installer.minisig'
     key.write_bytes(base64.b64decode(public_key))
-    decoded_signature = base64.b64decode(signature.read_text().strip())
+    decoded_signature = base64.b64decode(signature.read_bytes().strip())
     if f'version:{version}' not in decoded_signature.decode().splitlines()[2].split('\t'):
         raise RuntimeError('Installer signature is not bound to the published app version')
     sig.write_bytes(decoded_signature)
@@ -186,8 +244,11 @@ def verify_signature(installer, signature, public_key, version):
 
 
 def publish():
-    plan = json.loads((DIST / 'manifest.json').read_text())
+    plan = json.loads((DIST / 'manifest.json').read_bytes())
     tag = plan['tag']
+    expected = {path.name: path for path in DIST.iterdir()}
+    if set(expected) != release_asset_names(plan['version']):
+        raise RuntimeError('Local release assets are incomplete or unexpected')
     run('git', 'push', 'origin', f'{plan["source_commit"]}:refs/tags/{tag}')
     notes = WORK / 'notes.md'
     notes.write_text(f'Unofficial Windows amd64 personal build, based on upstream {plan["upstream_tag"]}.\n\n'
@@ -197,11 +258,10 @@ def publish():
                      'Update signatures and SHA256SUMS were verified before publication.\n', encoding='utf-8')
     run('gh', 'release', 'create', tag, '--repo', REPO, '--verify-tag', '--draft', '--title', tag, '--notes-file', str(notes),
         *map(str, sorted(DIST.iterdir())))
-    assets = json.loads(run('gh', 'release', 'view', tag, '--repo', REPO, '--json', 'assets', capture=True))['assets']
-    expected = {path.name: path for path in DIST.iterdir()}
-    if {a['name'] for a in assets} != set(expected):
+    draft = json.loads(run('gh', 'release', 'view', tag, '--repo', REPO, '--json', 'assets,isDraft', capture=True))
+    if not draft['isDraft'] or not release_assets_complete(tag, draft['assets']):
         raise RuntimeError('Draft release assets are incomplete')
-    for asset in assets:
+    for asset in draft['assets']:
         if asset['size'] != expected[asset['name']].stat().st_size or asset.get('digest') != f'sha256:{sha(expected[asset["name"]])}':
             raise RuntimeError(f'Release asset verification failed: {asset["name"]}')
     run('gh', 'release', 'edit', tag, '--repo', REPO, '--draft=false', '--prerelease=false', '--latest')
