@@ -1,3 +1,5 @@
+> **Clash Verge Personal**: Windows amd64 only, with a pinned personal split-route core and signed in-app updates. [Downloads](https://github.com/Chen017/clash-verge-rev/releases/latest) · [Migration and maintenance](.personal/README.md). Unofficial build; upstream documentation follows.
+
 <h1 align="center">
   <img src="./src-tauri/icons/icon.png" alt="Clash" width="128" />
   <br>
