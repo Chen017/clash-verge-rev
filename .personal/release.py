@@ -158,7 +158,11 @@ def prepare():
     if subprocess.run(['git', 'apply', '--check', patch], cwd=SOURCE, capture_output=True).returncode == 0:
         run('git', 'apply', patch, cwd=SOURCE)
     elif subprocess.run(['git', 'apply', '--reverse', '--check', patch], cwd=SOURCE, capture_output=True).returncode:
-        run('git', 'apply', '--3way', patch, cwd=SOURCE)
+        try:
+            run('git', 'apply', '--3way', patch, cwd=SOURCE)
+        except subprocess.CalledProcessError:
+            outputs(patch_conflict=True)
+            raise
     shutil.copytree(ROOT / '.personal', SOURCE / '.personal', ignore=shutil.ignore_patterns('work', 'dist', '__pycache__'))
     write_json(SOURCE / '.personal/core-lock.json', lock)
     version = f'{tag[1:]}-personal.{number}'
