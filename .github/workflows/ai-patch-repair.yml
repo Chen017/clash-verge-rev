@@ -1,0 +1,162 @@
+name: One-shot AI patch repair
+
+on:
+  workflow_call:
+
+jobs:
+  claim:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      attempt: ${{ steps.claim.outputs.attempt }}
+      branch: ${{ steps.claim.outputs.branch }}
+    steps:
+      - name: Record one attempt for this upstream and maintenance revision
+        id: claim
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          upstream="$(gh api repos/clash-verge-rev/clash-verge-rev/releases/latest --jq .tag_name)"
+          core="$(gh api repos/Chen017/mihomo/releases/latest --jq .tag_name)"
+          key="$(printf '%s' "$GITHUB_SHA|$upstream|$core" | sha256sum | cut -c1-24)"
+          branch="bot/ai-patch-repair-$key"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$branch" > /dev/null 2>&1; then
+            echo "attempt=false" >> "$GITHUB_OUTPUT"
+            echo "This exact upstream/maintenance combination already had one AI attempt: $branch" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/heads/$branch" -f sha="$GITHUB_SHA" > /dev/null
+          echo "attempt=true" >> "$GITHUB_OUTPUT"
+
+  repair:
+    needs: claim
+    if: needs.claim.outputs.attempt == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: read
+      copilot-requests: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Capture the exact upstream patch conflict
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          python3 .personal/release.py prepare > conflict-context.txt 2>&1
+          exit_code=$?
+          set -e
+          cat conflict-context.txt
+          if [ "$exit_code" -eq 0 ]; then
+            echo "Conflict no longer reproduces; no AI repair is necessary."
+            exit 1
+          fi
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Install Copilot CLI
+        run: npm install -g @github/copilot
+      - name: Attempt exactly one Copilot repair
+        timeout-minutes: 15
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          cat > .ai-repair-prompt.txt <<'PROMPT'
+          A stable upstream release broke the maintained patch in this repository.
+          Read conflict-context.txt, .personal/work/source, the relevant upstream code, and the original maintained patches.
+          Preserve all custom behavior and upstream improvements; resolve the conflict without dropping features.
+          You are allowed to MODIFY ONLY these tracked patch files: .personal/app.patch.
+          Do not modify scripts, workflows, source worktrees, test files, or any other tracked files.
+          Do not run commands, commit, push, create PRs, delete files, or request a second AI repair attempt.
+          Produce the smallest patch-file changes that apply cleanly to the latest stable upstream source.
+          CI will independently clean the preparation tree, reapply the patches and run tests.
+          If the intent cannot be preserved reliably, leave the patch unchanged so CI fails safely.
+          PROMPT
+          copilot -p "$(cat .ai-repair-prompt.txt)" --allow-tool=read --allow-tool=write --deny-tool=shell --no-ask-user
+      - name: Verify file scope, reapply patches on clean upstream and run tests
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import subprocess
+          changed = subprocess.check_output(['git', 'diff', '--name-only', '-z']).decode().split('\0')
+          changed = [path for path in changed if path]
+          if not changed or any(not (path == '.personal/app.patch') for path in changed):
+              raise SystemExit(f'Unsafe or empty AI change set: {changed!r}')
+          if subprocess.check_output(['git', 'diff', '--cached', '--name-only']).strip():
+              raise SystemExit('Unexpected staged changes from AI')
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          print('Allowed maintenance patch changes:', changed)
+          PY
+          git worktree remove --force --force ".personal/work/source" || true
+          rm -rf ".personal/work"
+          git worktree prune
+          (
+            set -e
+            python3 .personal/release.py prepare
+            python3 -m unittest discover -s .personal -p 'test_*.py' -v
+            node --check .personal/core.mjs
+          ) 2>&1 | tee validation.log
+          git diff --binary > repair.patch
+          test -s repair.patch
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: one-shot-ai-repair
+          path: |
+            conflict-context.txt
+            validation.log
+            repair.patch
+          if-no-files-found: ignore
+          retention-days: 14
+
+  propose:
+    needs: [claim, repair]
+    if: needs.repair.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: one-shot-ai-repair
+          path: .ai-candidate
+      - name: Apply validated patch changes and create a review PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPAIR_BRANCH: ${{ needs.claim.outputs.branch }}
+        run: |
+          set -euo pipefail
+          test -s .ai-candidate/repair.patch
+          git apply --check .ai-candidate/repair.patch
+          git apply .ai-candidate/repair.patch
+          python3 - <<'PY'
+          import subprocess
+          changed = subprocess.check_output(['git', 'diff', '--name-only', '-z']).decode().split('\0')
+          changed = [path for path in changed if path]
+          if not changed or any(not (path == '.personal/app.patch') for path in changed):
+              raise SystemExit(f'Unexpected changed files in PR candidate: {changed!r}')
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c "$REPAIR_BRANCH"
+          git add -- .personal/app.patch
+          git commit -m "fix: rebase maintained patches onto stable upstream"
+          gh auth setup-git
+          git push origin "HEAD:refs/heads/$REPAIR_BRANCH"
+          gh pr create --base "$GITHUB_REF_NAME" --head "$REPAIR_BRANCH" \
+            --title "fix: AI-rebase upstream patches (review required)" \
+            --body "One Copilot CLI repair attempt was made after an upstream patch conflict. Only maintained patch files were changed. Fresh upstream patch application and focused checks passed in the repair job. **Review manually before merging.** No automatic merge or release occurs from this job. The original failed run and the 14-day diagnostic artifact remain available."
