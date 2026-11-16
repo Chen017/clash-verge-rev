@@ -17,3 +17,7 @@ target
 .vfox
 .claude
 .zed
+
+/.personal/work/
+/.personal/dist/
+/.personal/__pycache__/

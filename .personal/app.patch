@@ -1,0 +1,851 @@
+diff --git a/.gitattributes b/.gitattributes
+index ff2ac129215bf3403b8734254f6dff0bf9b52623..174958b0288dd418c485d523829e660c78226779 100644
+--- a/.gitattributes
++++ b/.gitattributes
+@@ -2,3 +2,5 @@
+ Changelog.md merge=union
+ *.sh text eol=lf
+ *.bash text eol=lf
++
++.personal/*.patch text eol=lf -whitespace
+diff --git a/.gitignore b/.gitignore
+index f783f4549f5069b880cbfaa1a4b5674dfb463ad7..16c0b6982e61f81fed49aa490cea06e2819d59be 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -17,3 +17,7 @@ target
+ .vfox
+ .claude
+ .zed
++
++/.personal/work/
++/.personal/dist/
++/.personal/__pycache__/
+diff --git a/README.md b/README.md
+index 55199771804cb475c3d02614794cdc4f1aa13c26..1ea6a0e12d4f2475da1811855bd63e96e734b83f 100644
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,5 @@
++> **Clash Verge Personal**: Windows amd64 only, with a pinned personal split-route core and signed in-app updates. [Downloads](https://github.com/Chen017/clash-verge-rev/releases/latest) · [Migration and maintenance](.personal/README.md). Unofficial build; upstream documentation follows.
++
+ <h1 align="center">
+   <img src="./src-tauri/icons/icon.png" alt="Clash" width="128" />
+   <br>
+diff --git a/scripts/prebuild.mjs b/scripts/prebuild.mjs
+index 22dd960326846581ff570a49ce65e347d8511987..a2f122b94577709c98e8d7a2980a87052674df5d 100644
+--- a/scripts/prebuild.mjs
++++ b/scripts/prebuild.mjs
+@@ -3,13 +3,13 @@ import { createHash } from 'node:crypto'
+ import fs from 'node:fs'
+ import fsp from 'node:fs/promises'
+ import path from 'node:path'
+-import zlib from 'node:zlib'
+ 
+ import AdmZip from 'adm-zip'
+ import { glob } from 'glob'
+ import { HttpsProxyAgent } from 'https-proxy-agent'
+ import { extract } from 'tar'
+ 
++import { stagePersonalCore } from '../.personal/core.mjs'
+ import { resolveServiceRelease } from './service-release.mjs'
+ import { log_debug, log_error, log_info, log_success } from './utils.mjs'
+ 
+@@ -18,7 +18,6 @@ import { log_debug, log_error, log_info, log_success } from './utils.mjs'
+ const cwd = process.cwd()
+ const TEMP_DIR = path.join(cwd, 'node_modules/.verge')
+ const FORCE = process.argv.includes('--force') || process.argv.includes('-f')
+-const VERSION_CACHE_FILE = path.join(TEMP_DIR, '.version_cache.json')
+ const HASH_CACHE_FILE = path.join(TEMP_DIR, '.hash_cache.json')
+ 
+ const PLATFORM_MAP = {
+@@ -34,29 +33,13 @@ const PLATFORM_MAP = {
+   'riscv64gc-unknown-linux-gnu': 'linux',
+   'loongarch64-unknown-linux-gnu': 'linux',
+ }
+-const ARCH_MAP = {
+-  'x86_64-pc-windows-msvc': 'x64',
+-  'i686-pc-windows-msvc': 'ia32',
+-  'aarch64-pc-windows-msvc': 'arm64',
+-  'x86_64-apple-darwin': 'x64',
+-  'aarch64-apple-darwin': 'arm64',
+-  'x86_64-unknown-linux-gnu': 'x64',
+-  'i686-unknown-linux-gnu': 'ia32',
+-  'aarch64-unknown-linux-gnu': 'arm64',
+-  'armv7-unknown-linux-gnueabihf': 'arm',
+-  'riscv64gc-unknown-linux-gnu': 'riscv64',
+-  'loongarch64-unknown-linux-gnu': 'loong64',
+-}
+-
+ const arg1 = process.argv.slice(2)[0]
+ const arg2 = process.argv.slice(2)[1]
+ const target = arg1 === '--force' || arg1 === '-f' ? arg2 : arg1
+ if (process.env.CI && !target) {
+   throw new Error('prebuild requires an explicit target triple in CI')
+ }
+-const { platform, arch } = target
+-  ? { platform: PLATFORM_MAP[target], arch: ARCH_MAP[target] }
+-  : process
++const platform = target ? PLATFORM_MAP[target] : process.platform
+ 
+ const SIDECAR_HOST = target
+   ? target
+@@ -69,42 +52,6 @@ const SIDECAR_DIR = path.join(cwd, 'src-tauri', 'sidecar')
+ // Linux service binaries are bundled as externalBin sidecars (see tauri.linux.conf.json)
+ const SERVICE_DIR = platform === 'linux' ? SIDECAR_DIR : RESOURCES_DIR
+ 
+-// Version cache
+-async function loadVersionCache() {
+-  try {
+-    if (fs.existsSync(VERSION_CACHE_FILE)) {
+-      const data = await fsp.readFile(VERSION_CACHE_FILE, 'utf-8')
+-      return JSON.parse(data)
+-    }
+-  } catch (err) {
+-    log_debug('Failed to load version cache:', err.message)
+-  }
+-  return {}
+-}
+-async function saveVersionCache(cache) {
+-  try {
+-    await fsp.mkdir(TEMP_DIR, { recursive: true })
+-    await fsp.writeFile(VERSION_CACHE_FILE, JSON.stringify(cache, null, 2))
+-    log_debug('Version cache saved')
+-  } catch (err) {
+-    log_debug('Failed to save version cache:', err.message)
+-  }
+-}
+-async function getCachedVersion(key) {
+-  const cache = await loadVersionCache()
+-  const cached = cache[key]
+-  if (cached && Date.now() - cached.timestamp < 3600000) {
+-    log_info(`Using cached version for ${key}: ${cached.version}`)
+-    return cached.version
+-  }
+-  return null
+-}
+-async function setCachedVersion(key, version) {
+-  const cache = await loadVersionCache()
+-  cache[key] = { version, timestamp: Date.now() }
+-  await saveVersionCache(cache)
+-}
+-
+ // File hash cache
+ async function calculateFileHash(filePath) {
+   try {
+@@ -159,145 +106,6 @@ async function updateHashCache(targetPath) {
+   }
+ }
+ 
+-// Mihomo release maps
+-const META_ALPHA_VERSION_URL =
+-  'https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/version.txt'
+-const META_ALPHA_URL_PREFIX = `https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha`
+-let META_ALPHA_VERSION
+-
+-const META_VERSION_URL =
+-  'https://github.com/MetaCubeX/mihomo/releases/latest/download/version.txt'
+-const META_URL_PREFIX = `https://github.com/MetaCubeX/mihomo/releases/download`
+-let META_VERSION
+-
+-const META_ALPHA_MAP = {
+-  'win32-x64': 'mihomo-windows-amd64-v2',
+-  'win32-ia32': 'mihomo-windows-386',
+-  'win32-arm64': 'mihomo-windows-arm64',
+-  'darwin-x64': 'mihomo-darwin-amd64-v1-go122',
+-  'darwin-arm64': 'mihomo-darwin-arm64-go122',
+-  'linux-x64': 'mihomo-linux-amd64-v2',
+-  'linux-ia32': 'mihomo-linux-386',
+-  'linux-arm64': 'mihomo-linux-arm64',
+-  'linux-arm': 'mihomo-linux-armv7',
+-  'linux-riscv64': 'mihomo-linux-riscv64',
+-  'linux-loong64': 'mihomo-linux-loong64',
+-}
+-
+-const META_MAP = {
+-  'win32-x64': 'mihomo-windows-amd64-v2',
+-  'win32-ia32': 'mihomo-windows-386',
+-  'win32-arm64': 'mihomo-windows-arm64',
+-  'darwin-x64': 'mihomo-darwin-amd64-v2-go122',
+-  'darwin-arm64': 'mihomo-darwin-arm64-go122',
+-  'linux-x64': 'mihomo-linux-amd64-v2',
+-  'linux-ia32': 'mihomo-linux-386',
+-  'linux-arm64': 'mihomo-linux-arm64',
+-  'linux-arm': 'mihomo-linux-armv7',
+-  'linux-riscv64': 'mihomo-linux-riscv64',
+-  'linux-loong64': 'mihomo-linux-loong64',
+-}
+-
+-// Release discovery
+-async function getLatestAlphaVersion() {
+-  if (!FORCE) {
+-    const cached = await getCachedVersion('META_ALPHA_VERSION')
+-    if (cached) {
+-      META_ALPHA_VERSION = cached
+-      return
+-    }
+-  }
+-  const options = {}
+-  const httpProxy =
+-    process.env.HTTP_PROXY ||
+-    process.env.http_proxy ||
+-    process.env.HTTPS_PROXY ||
+-    process.env.https_proxy
+-  if (httpProxy) options.agent = new HttpsProxyAgent(httpProxy)
+-
+-  try {
+-    const response = await fetch(META_ALPHA_VERSION_URL, {
+-      ...options,
+-      method: 'GET',
+-    })
+-    if (!response.ok)
+-      throw new Error(
+-        `Failed to fetch ${META_ALPHA_VERSION_URL}: ${response.status}`,
+-      )
+-    META_ALPHA_VERSION = (await response.text()).trim()
+-    log_info(`Latest alpha version: ${META_ALPHA_VERSION}`)
+-    await setCachedVersion('META_ALPHA_VERSION', META_ALPHA_VERSION)
+-  } catch (err) {
+-    log_error('Error fetching latest alpha version:', err.message)
+-    process.exit(1)
+-  }
+-}
+-
+-async function getLatestReleaseVersion() {
+-  if (!FORCE) {
+-    const cached = await getCachedVersion('META_VERSION')
+-    if (cached) {
+-      META_VERSION = cached
+-      return
+-    }
+-  }
+-  const options = {}
+-  const httpProxy =
+-    process.env.HTTP_PROXY ||
+-    process.env.http_proxy ||
+-    process.env.HTTPS_PROXY ||
+-    process.env.https_proxy
+-  if (httpProxy) options.agent = new HttpsProxyAgent(httpProxy)
+-
+-  try {
+-    const response = await fetch(META_VERSION_URL, {
+-      ...options,
+-      method: 'GET',
+-    })
+-    if (!response.ok)
+-      throw new Error(`Failed to fetch ${META_VERSION_URL}: ${response.status}`)
+-    META_VERSION = (await response.text()).trim()
+-    log_info(`Latest release version: ${META_VERSION}`)
+-    await setCachedVersion('META_VERSION', META_VERSION)
+-  } catch (err) {
+-    log_error('Error fetching latest release version:', err.message)
+-    process.exit(1)
+-  }
+-}
+-
+-if (!META_MAP[`${platform}-${arch}`]) {
+-  throw new Error(`clash meta unsupported platform "${platform}-${arch}"`)
+-}
+-if (!META_ALPHA_MAP[`${platform}-${arch}`]) {
+-  throw new Error(`clash meta alpha unsupported platform "${platform}-${arch}"`)
+-}
+-
+-function clashMetaAlpha() {
+-  const name = META_ALPHA_MAP[`${platform}-${arch}`]
+-  const isWin = platform === 'win32'
+-  const urlExt = isWin ? 'zip' : 'gz'
+-  return {
+-    name: 'verge-mihomo-alpha',
+-    targetFile: `verge-mihomo-alpha-${SIDECAR_HOST}${isWin ? '.exe' : ''}`,
+-    exeFile: `${name}${isWin ? '.exe' : ''}`,
+-    zipFile: `${name}-${META_ALPHA_VERSION}.${urlExt}`,
+-    downloadURL: `${META_ALPHA_URL_PREFIX}/${name}-${META_ALPHA_VERSION}.${urlExt}`,
+-  }
+-}
+-
+-function clashMeta() {
+-  const name = META_MAP[`${platform}-${arch}`]
+-  const isWin = platform === 'win32'
+-  const urlExt = isWin ? 'zip' : 'gz'
+-  return {
+-    name: 'verge-mihomo',
+-    targetFile: `verge-mihomo-${SIDECAR_HOST}${isWin ? '.exe' : ''}`,
+-    exeFile: `${name}${isWin ? '.exe' : ''}`,
+-    zipFile: `${name}-${META_VERSION}.${urlExt}`,
+-    downloadURL: `${META_URL_PREFIX}/${META_VERSION}/${name}-${META_VERSION}.${urlExt}`,
+-  }
+-}
+-
+ async function downloadFile(url, outPath) {
+   const options = {}
+   const httpProxy =
+@@ -342,94 +150,6 @@ async function downloadFile(url, outPath) {
+   log_success(`download finished: ${url}`)
+ }
+ 
+-async function resolveSidecar(binInfo) {
+-  const { name, targetFile, zipFile, exeFile, downloadURL } = binInfo
+-  const sidecarPath = path.join(SIDECAR_DIR, targetFile)
+-  await fsp.mkdir(SIDECAR_DIR, { recursive: true })
+-
+-  if (!FORCE && fs.existsSync(sidecarPath)) {
+-    log_success(`"${name}" already exists, skipping download`)
+-    return
+-  }
+-
+-  const tempDir = path.join(TEMP_DIR, name)
+-  const tempZip = path.join(tempDir, zipFile)
+-  const tempExe = path.join(tempDir, exeFile)
+-  await fsp.mkdir(tempDir, { recursive: true })
+-
+-  try {
+-    if (!fs.existsSync(tempZip)) {
+-      await downloadFile(downloadURL, tempZip)
+-    }
+-
+-    if (zipFile.endsWith('.zip')) {
+-      const zip = new AdmZip(tempZip)
+-      zip.getEntries().forEach((entry) => {
+-        log_debug(`"${name}" entry: ${entry.entryName}`)
+-      })
+-      zip.extractAllTo(tempDir, true)
+-      if (fs.existsSync(tempExe)) {
+-        await fsp.rename(tempExe, sidecarPath)
+-      } else {
+-        const files = await fsp.readdir(tempDir)
+-        const candidate = files.find(
+-          (f) =>
+-            f === path.basename(exeFile) ||
+-            f.endsWith('.exe') ||
+-            !f.includes('.'),
+-        )
+-        if (!candidate)
+-          throw new Error(`Expected binary not found in ${tempDir}`)
+-        await fsp.rename(path.join(tempDir, candidate), sidecarPath)
+-      }
+-      if (platform !== 'win32') await fsp.chmod(sidecarPath, 0o755)
+-      log_success(`unzip finished: "${name}"`)
+-    } else if (zipFile.endsWith('.tgz')) {
+-      await extract({ cwd: tempDir, file: tempZip })
+-      const files = await fsp.readdir(tempDir)
+-      log_debug(`"${name}" extracted files:`, files)
+-      let extracted = files.find(
+-        (f) =>
+-          f === path.basename(exeFile) ||
+-          f.startsWith('虚空终端-') ||
+-          !f.includes('.'),
+-      )
+-      if (!extracted) extracted = files[0]
+-      if (!extracted) throw new Error(`Expected file not found in ${tempDir}`)
+-      await fsp.rename(path.join(tempDir, extracted), sidecarPath)
+-      await fsp.chmod(sidecarPath, 0o755)
+-      log_success(`tgz processed: "${name}"`)
+-    } else {
+-      const readStream = fs.createReadStream(tempZip)
+-      const writeStream = fs.createWriteStream(sidecarPath)
+-      await new Promise((resolve, reject) => {
+-        readStream
+-          .pipe(zlib.createGunzip())
+-          .on('error', (e) => {
+-            log_error(`gunzip error for ${name}:`, e.message)
+-            reject(e)
+-          })
+-          .pipe(writeStream)
+-          .on('finish', () => {
+-            if (platform !== 'win32')
+-              execFileSync('chmod', ['755', sidecarPath])
+-            resolve()
+-          })
+-          .on('error', (e) => {
+-            log_error(`write stream error for ${name}:`, e.message)
+-            reject(e)
+-          })
+-      })
+-      log_success(`gz binary processed: "${name}"`)
+-    }
+-  } catch (err) {
+-    await fsp.rm(sidecarPath, { recursive: true, force: true })
+-    throw err
+-  } finally {
+-    await fsp.rm(tempDir, { recursive: true, force: true })
+-  }
+-}
+-
+ async function resolveResource(binInfo) {
+   const { file, downloadURL, localPath, dir } = binInfo
+   const baseDir = dir ?? RESOURCES_DIR
+@@ -730,19 +450,7 @@ const resolveUnSetDnsScript = () =>
+   })
+ 
+ const tasks = [
+-  {
+-    name: 'verge-mihomo-alpha',
+-    func: () =>
+-      getLatestAlphaVersion().then(() => resolveSidecar(clashMetaAlpha())),
+-    retry: 5,
+-  },
+-  {
+-    name: 'verge-mihomo',
+-    func: () =>
+-      getLatestReleaseVersion().then(() => resolveSidecar(clashMeta())),
+-    retry: 5,
+-  },
+-  // After both sidecar tasks: it hashes what they downloaded.
++  { name: 'personal_core', func: () => stagePersonalCore(cwd, SIDECAR_HOST), retry: 3 },
+   { name: 'core_hashes', func: resolveCoreHashes, retry: 1, winOnly: true },
+   { name: 'plugin', func: resolvePlugin, retry: 5, winOnly: true },
+   { name: 'service', func: resolveServiceBundle, retry: 5 },
+diff --git a/src-tauri/Cargo.toml b/src-tauri/Cargo.toml
+index fa96f1e8f88976ecfeca8716d0254c8a27618d7d..862259e775241b699fc4c16037ac03bb7617ba17 100755
+--- a/src-tauri/Cargo.toml
++++ b/src-tauri/Cargo.toml
+@@ -85,6 +85,7 @@ reqwest_dav = "0.3.3"
+ aes-gcm = { version = "0.11.1" }
+ base64 = "0.23.1"
+ minisign-verify = "0.3.0"
++semver = "1.0.28"
+ sha2 = "0.11.1"
+ getrandom = "0.4.3"
+ futures = "0.3.34"
+diff --git a/src-tauri/src/config/verge.rs b/src-tauri/src/config/verge.rs
+index 45b0e18ec9c188c2d99ff89588754aabf47fd8be..412c7fdb4cee39cd17170383422f59ab761fbbcd 100644
+--- a/src-tauri/src/config/verge.rs
++++ b/src-tauri/src/config/verge.rs
+@@ -265,7 +265,7 @@ pub struct IVergeTheme {
+ }
+ 
+ impl IVerge {
+-    pub const VALID_CLASH_CORES: &'static [&'static str] = &["verge-mihomo", "verge-mihomo-alpha"];
++    pub const VALID_CLASH_CORES: &'static [&'static str] = &["verge-mihomo"];
+ 
+     pub async fn validate_and_fix_config() -> Result<()> {
+         let config_path = dirs::verge_path()?;
+diff --git a/src-tauri/src/core/updater.rs b/src-tauri/src/core/updater.rs
+index c017582eb803c7073673bce2b31c72f94751bcf4..438a215450bfa85eb38e5d465e041cd3ce8ce66b 100644
+--- a/src-tauri/src/core/updater.rs
++++ b/src-tauri/src/core/updater.rs
+@@ -174,33 +174,22 @@ pub fn is_build_to_stable(current: &str, remote: &str) -> bool {
+     !build.is_empty() && !base.contains('-') && base == remote.trim_start_matches('v')
+ }
+ 
+-/// Compares numeric version components after stripping version suffixes.
+ fn version_lte(a: &str, b: &str) -> bool {
+-    let parse = |v: &str| -> Vec<u64> {
+-        v.trim_start_matches('v')
+-            .split(['-', '+'])
+-            .next()
+-            .unwrap_or("0")
+-            .split('.')
+-            .filter_map(|part| part.parse::<u64>().ok())
+-            .collect()
+-    };
+-
+-    let a_parts = parse(a);
+-    let b_parts = parse(b);
+-    let len = a_parts.len().max(b_parts.len());
++    match (semver::Version::parse(a.trim_start_matches('v')), semver::Version::parse(b.trim_start_matches('v'))) {
++        (Ok(a), Ok(b)) => a.cmp_precedence(&b).is_le(),
++        _ => true,
++    }
++}
+ 
+-    for i in 0..len {
+-        let av = a_parts.get(i).copied().unwrap_or(0);
+-        let bv = b_parts.get(i).copied().unwrap_or(0);
+-        if av < bv {
+-            return true;
+-        }
+-        if av > bv {
+-            return false;
+-        }
++#[cfg(test)]
++mod personal_update_tests {
++    #[test]
++    fn core_only_updates_keep_numeric_prerelease_order() {
++        assert!(!super::version_lte("2.5.10-personal.2", "2.5.10-personal.1"));
++        assert!(!super::version_lte("2.5.10-personal.10", "2.5.10-personal.2"));
++        assert!(super::version_lte("2.5.10-personal.1", "2.5.10-personal.2"));
++        assert!(super::version_lte("2.5.10+abc", "2.5.10+def"));
+     }
+-    true // equal
+ }
+ 
+ /// Maps UI language to one of the three NSIS translations, defaulting to English.
+diff --git a/src-tauri/src/feat/core_upgrade.rs b/src-tauri/src/feat/core_upgrade.rs
+index dfb415aa0e24a171ef4343d42ccb086a5a377233..014db2f55a7370e60ff0ddcd8114b95e575b463a 100644
+--- a/src-tauri/src/feat/core_upgrade.rs
++++ b/src-tauri/src/feat/core_upgrade.rs
+@@ -13,6 +13,7 @@ use crate::{
+ };
+ use anyhow::{Context as _, Result, anyhow, bail};
+ use clash_verge_logging::{Type, logging};
++use sha2::{Digest as _, Sha256};
+ use std::{
+     env::current_exe,
+     ffi::OsStr,
+@@ -22,9 +23,8 @@ use std::{
+     sync::atomic::{AtomicU64, Ordering},
+ };
+ 
+-const RELEASE_VERSION_URL: &str = "https://github.com/MetaCubeX/mihomo/releases/latest/download/version.txt";
+-const ALPHA_BASE_URL: &str = "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha";
+-const RELEASE_DOWNLOAD_URL: &str = "https://github.com/MetaCubeX/mihomo/releases/download";
++const RELEASE_VERSION_URL: &str = "https://github.com/Chen017/mihomo/releases/latest/download/version.txt";
++const RELEASE_DOWNLOAD_URL: &str = "https://github.com/Chen017/mihomo/releases/download";
+ const VERSION_TIMEOUT_SECS: u64 = 20;
+ const PACKAGE_TIMEOUT_SECS: u64 = 300;
+ /// Well above any real core package, low enough that a wrong response cannot exhaust memory.
+@@ -44,7 +44,6 @@ pub async fn upgrade_core(force: bool) -> Result<CoreUpgradeReport> {
+     let _serialized = UPGRADE_LOCK.lock().await;
+     let core = Config::verge().await.latest_arc().get_valid_clash_core();
+     tracing::Span::current().record("core", tracing::field::display(&core));
+-    let alpha = core.ends_with("-alpha");
+     let target = managed_core_path(&core)?;
+ 
+     // A core already broken by the in-place updater cannot report a version; upgrading is the repair.
+@@ -53,17 +52,17 @@ pub async fn upgrade_core(force: bool) -> Result<CoreUpgradeReport> {
+         std::string::String::new()
+     });
+ 
+-    let (proxy, latest) = resolve_latest_version(alpha).await?;
++    let (proxy, latest) = resolve_latest_version().await?;
+     let span = tracing::Span::current();
+     span.record("from", tracing::field::display(&installed));
+     span.record("to", tracing::field::display(&latest));
+     logging!(debug, Type::Core, "core upgrade: latest version resolved via {proxy:?}");
+ 
+-    if !force && installed == latest {
++    if !force && installed == latest && running_core_version().await.is_ok_and(|v| v == latest) {
+         return Ok(CoreUpgradeReport { upgraded: false });
+     }
+ 
+-    let package = download_package(proxy, alpha, &latest).await?;
++    let package = download_package(proxy, &latest).await?;
+     let staged = stage_core(&target, &package, &latest)?;
+ 
+     // A hard link keeps the previous core reachable without touching the inode the running
+@@ -98,6 +97,15 @@ pub async fn upgrade_core(force: bool) -> Result<CoreUpgradeReport> {
+             .restart_core()
+             .await
+             .context("core replaced but failed to restart");
++        if result.is_ok() {
++            result = match running_core_version().await {
++                Ok(version) if version == latest => Ok(()),
++                other => {
++                    let _ = CoreManager::global().stop_core().await;
++                    Err(anyhow!("running core does not match {latest}: {other:?}"))
++                }
++            };
++        }
+     }
+ 
+     if let Err(error) = result {
+@@ -172,58 +180,17 @@ fn managed_core_path(core: &str) -> Result<PathBuf> {
+ }
+ 
+ /// Pins the package to the resolved version, so a release moving on mid-upgrade cannot 404.
+-fn package_url(alpha: bool, version: &str) -> Result<std::string::String> {
+-    let asset = asset_base_name(alpha)?;
+-    let extension = if cfg!(windows) { "zip" } else { "gz" };
+-    Ok(if alpha {
+-        format!("{ALPHA_BASE_URL}/{asset}-{version}.{extension}")
+-    } else {
+-        format!("{RELEASE_DOWNLOAD_URL}/{version}/{asset}-{version}.{extension}")
+-    })
+-}
+-
+-/// Mirrors the asset map in `scripts/prebuild.mjs` so an upgrade keeps the build variant
+-/// the bundled sidecar was taken from.
+-fn asset_base_name(alpha: bool) -> Result<&'static str> {
+-    let arch = std::env::consts::ARCH;
+-    let unsupported = || anyhow!("no mihomo release asset for {}-{arch}", std::env::consts::OS);
+-
+-    let name = if cfg!(target_os = "windows") {
+-        match arch {
+-            "x86_64" => "mihomo-windows-amd64-v2",
+-            "x86" => "mihomo-windows-386",
+-            "aarch64" => "mihomo-windows-arm64",
+-            _ => return Err(unsupported()),
+-        }
+-    } else if cfg!(target_os = "macos") {
+-        match arch {
+-            "x86_64" if alpha => "mihomo-darwin-amd64-v1-go122",
+-            "x86_64" => "mihomo-darwin-amd64-v2-go122",
+-            "aarch64" => "mihomo-darwin-arm64-go122",
+-            _ => return Err(unsupported()),
+-        }
+-    } else {
+-        match arch {
+-            "x86_64" => "mihomo-linux-amd64-v2",
+-            "x86" => "mihomo-linux-386",
+-            "aarch64" => "mihomo-linux-arm64",
+-            "arm" => "mihomo-linux-armv7",
+-            "riscv64" => "mihomo-linux-riscv64",
+-            "loongarch64" => "mihomo-linux-loong64",
+-            _ => return Err(unsupported()),
+-        }
+-    };
+-    Ok(name)
++fn package_url(version: &str) -> Result<std::string::String> {
++    if !cfg!(all(target_os = "windows", target_arch = "x86_64")) {
++        bail!("personal core upgrades support Windows amd64 only");
++    }
++    Ok(format!("{RELEASE_DOWNLOAD_URL}/{version}/mihomo-windows-amd64-{version}.zip"))
+ }
+ 
+ /// Returns the proxy that reached GitHub so the package download reuses it.
+-#[tracing::instrument(skip_all, level = "debug", fields(alpha))]
+-async fn resolve_latest_version(alpha: bool) -> Result<(ProxyType, std::string::String)> {
+-    let url = if alpha {
+-        format!("{ALPHA_BASE_URL}/version.txt")
+-    } else {
+-        RELEASE_VERSION_URL.to_owned()
+-    };
++#[tracing::instrument(skip_all, level = "debug")]
++async fn resolve_latest_version() -> Result<(ProxyType, std::string::String)> {
++    let url = RELEASE_VERSION_URL.to_owned();
+     let mut last_error = None;
+ 
+     for proxy in [ProxyType::Localhost, ProxyType::System, ProxyType::None] {
+@@ -278,14 +245,39 @@ fn is_usable_version(version: &str) -> bool {
+             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+ }
+ 
+-async fn download_package(proxy: ProxyType, alpha: bool, version: &str) -> Result<Vec<u8>> {
+-    let url = package_url(alpha, version)?;
++async fn download_package(proxy: ProxyType, version: &str) -> Result<Vec<u8>> {
++    let url = package_url(version)?;
+     logging!(info, Type::Core, "core upgrade: downloading {url}");
+ 
+-    NetworkManager::new()
++    let checksums_url = format!("{RELEASE_DOWNLOAD_URL}/{version}/checksums.txt");
++    let checksums = NetworkManager::new()
++        .get_bytes(&checksums_url, proxy, Some(VERSION_TIMEOUT_SECS), 64 * 1024)
++        .await?;
++    let package = NetworkManager::new()
+         .get_bytes(&url, proxy, Some(PACKAGE_TIMEOUT_SECS), MAX_PACKAGE_BYTES)
+         .await
+-        .with_context(|| format!("failed to download {url}"))
++        .with_context(|| format!("failed to download {url}"))?;
++    verify_package_checksum(&package, &String::from_utf8(checksums)?, url.rsplit('/').next().unwrap_or_default())?;
++    Ok(package)
++}
++
++async fn running_core_version() -> Result<String> {
++    let response = tokio::time::timeout(
++        std::time::Duration::from_secs(VERSION_TIMEOUT_SECS),
++        crate::core::handle::Handle::mihomo().get_version(),
++    ).await.context("running core version probe timed out")??;
++    Ok(response.version)
++}
++
++fn verify_package_checksum(package: &[u8], checksums: &str, name: &str) -> Result<()> {
++    let expected = checksums.lines().find_map(|line| {
++        let mut fields = line.split_whitespace();
++        let hash = fields.next()?;
++        (fields.next()?.trim_start_matches('*') == name).then_some(hash)
++    }).context("core archive is missing from release checksums")?;
++    let actual = Sha256::digest(package).iter().map(|byte| format!("{byte:02x}")).collect::<String>();
++    anyhow::ensure!(actual.eq_ignore_ascii_case(expected), "core archive checksum mismatch");
++    Ok(())
+ }
+ 
+ /// A staged core that is removed unless publishing renamed it away.
+@@ -466,7 +458,17 @@ fn read_core_version(path: &Path) -> Result<std::string::String> {
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::{is_usable_version, package_url};
++    use super::{is_usable_version, package_url, verify_package_checksum};
++    use sha2::{Digest as _, Sha256};
++
++    #[test]
++    fn personal_archive_checksum_rejects_corruption_and_wrong_asset() {
++        let hash = Sha256::digest(b"verified core").iter().map(|byte| format!("{byte:02x}")).collect::<String>();
++        let checksums = format!("{hash}  core.zip\n");
++        assert!(verify_package_checksum(b"verified core", &checksums, "core.zip").is_ok());
++        assert!(verify_package_checksum(b"corrupt", &checksums, "core.zip").is_err());
++        assert!(verify_package_checksum(b"verified core", &checksums, "other.zip").is_err());
++    }
+ 
+     #[test]
+     fn only_plain_version_tokens_reach_the_package_url() {
+@@ -487,13 +489,11 @@ mod tests {
+ 
+     #[test]
+     fn package_urls_pin_the_resolved_version() {
+-        let release = package_url(false, "v1.19.30").unwrap_or_default();
+-        let alpha = package_url(true, "alpha-c0e43eb").unwrap_or_default();
++        let release = package_url("v1.19.30").unwrap_or_default();
+         assert!(release.contains("/releases/download/v1.19.30/"), "{release}");
+         assert!(
+             release.ends_with("-v1.19.30.gz") || release.ends_with("-v1.19.30.zip"),
+             "{release}"
+         );
+-        assert!(alpha.contains("/Prerelease-Alpha/"), "{alpha}");
+     }
+ }
+diff --git a/src-tauri/tauri.conf.json b/src-tauri/tauri.conf.json
+index 68be249cfcc7b8793b583f1a724d030100832a35..cbb8ddc4ae16cecac89ed8a7be322f47b292ff11 100755
+--- a/src-tauri/tauri.conf.json
++++ b/src-tauri/tauri.conf.json
+@@ -31,11 +31,10 @@
+   "identifier": "io.github.clash-verge-rev.clash-verge-rev",
+   "plugins": {
+     "updater": {
+-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQyOEMyRjBCQkVGOUJEREYKUldUZnZmbStDeStNMHU5Mmo1N24xQXZwSVRYbXA2NUpzZE5oVzlqeS9Bc0t6RVV4MmtwVjBZaHgK",
++      "requireSignedVersion": true,
++      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE0QTg4Qjk4RkY5RkU1MTUKUldRVjVaLy9tSXVvcFBQYUxLZFNJVlRPbXlrNDFMVXdXNnRObWJiMW1kNjdaaG8xNXU1Q2dvVmIK",
+       "endpoints": [
+-        "https://update.hwdns.net/https://github.com/clash-verge-rev/clash-verge-rev/releases/download/updater/update-proxy.json",
+-        "https://gh-proxy.org/https://github.com/clash-verge-rev/clash-verge-rev/releases/download/updater/update-proxy.json",
+-        "https://github.com/clash-verge-rev/clash-verge-rev/releases/download/updater/update.json"
++        "https://github.com/Chen017/clash-verge-rev/releases/latest/download/update.json"
+       ],
+       "windows": {
+         "installMode": "passive"
+diff --git a/src/components/setting/mods/clash-core-viewer.tsx b/src/components/setting/mods/clash-core-viewer.tsx
+index 0b365b9f10deef2749a587d456e5a2d4ed370b9f..73bbf04ba57cc6ab1f150bebc32bc30a836e2255 100644
+--- a/src/components/setting/mods/clash-core-viewer.tsx
++++ b/src/components/setting/mods/clash-core-viewer.tsx
+@@ -6,89 +6,32 @@ import {
+   Box,
+   Button,
+   Chip,
+-  CircularProgress,
+   List,
+-  ListItemButton,
++  ListItem,
+   ListItemText,
+ } from '@mui/material'
+ import { useLockFn } from 'ahooks'
+ import type { Ref } from 'react'
+ import { useImperativeHandle, useState } from 'react'
+ import { useTranslation } from 'react-i18next'
+-import { closeAllConnections } from 'tauri-plugin-mihomo-api'
+ 
+ import { BaseDialog, DialogRef } from '@/components/base'
+-import { useClash, useClashInfo } from '@/hooks/use-clash'
+-import { useVerge } from '@/hooks/use-verge'
+-import { changeClashCore, restartCore, upgradeClashCore } from '@/services/cmds'
++import { restartCore, upgradeClashCore } from '@/services/cmds'
+ import { mutate } from '@/services/mutate'
+ import { showNotice } from '@/services/notice-service'
+ 
+-const VALID_CORE = [
+-  {
+-    name: 'Mihomo',
+-    core: 'verge-mihomo',
+-    chipKey: 'settings.modals.clashCore.variants.release',
+-  },
+-  {
+-    name: 'Mihomo Alpha',
+-    core: 'verge-mihomo-alpha',
+-    chipKey: 'settings.modals.clashCore.variants.alpha',
+-  },
+-]
+-
+ export function ClashCoreViewer({ ref }: { ref?: Ref<DialogRef> }) {
+   const { t } = useTranslation()
+ 
+-  const { verge, mutateVerge } = useVerge()
+-  const { mutateVersion } = useClash()
+-  const { invalidateClashConfig } = useClashInfo()
+-
+   const [open, setOpen] = useState(false)
+   const [upgrading, setUpgrading] = useState(false)
+   const [restarting, setRestarting] = useState(false)
+-  const [changingCore, setChangingCore] = useState<string | null>(null)
+ 
+   useImperativeHandle(ref, () => ({
+     open: () => setOpen(true),
+     close: () => setOpen(false),
+   }))
+ 
+-  const { clash_core = 'verge-mihomo' } = verge ?? {}
+-
+-  const onCoreChange = useLockFn(async (core: string) => {
+-    if (core === clash_core) return
+-
+-    try {
+-      setChangingCore(core)
+-      void mutate(() => closeAllConnections(), {
+-        id: 'close-all-connections',
+-        errorNotice: false,
+-      })
+-      const result = await mutate(() => changeClashCore(core), {
+-        id: 'change-clash-core',
+-        errorNotice: false,
+-      })
+-      if (!result.ok) return
+-      const errorMsg = result.value
+-
+-      if (errorMsg) {
+-        showNotice.error(errorMsg)
+-        setChangingCore(null)
+-        return
+-      }
+-
+-      mutateVerge()
+-      await new Promise((resolve) => setTimeout(resolve, 500))
+-      invalidateClashConfig()
+-      mutateVersion()
+-    } catch (err) {
+-      showNotice.error(err)
+-    } finally {
+-      setChangingCore(null)
+-    }
+-  })
+-
+   const onRestart = useLockFn(async () => {
+     try {
+       setRestarting(true)
+@@ -137,7 +80,7 @@ export function ClashCoreViewer({ ref }: { ref?: Ref<DialogRef> }) {
+               startIcon={<SwitchAccessShortcutRounded />}
+               loadingPosition="start"
+               loading={upgrading}
+-              disabled={restarting || changingCore !== null}
++              disabled={restarting}
+               sx={{ marginRight: '8px' }}
+               onClick={onUpgrade}
+             >
+@@ -171,21 +114,13 @@ export function ClashCoreViewer({ ref }: { ref?: Ref<DialogRef> }) {
+       onCancel={() => setOpen(false)}
+     >
+       <List component="nav">
+-        {VALID_CORE.map((each) => (
+-          <ListItemButton
+-            key={each.core}
+-            selected={each.core === clash_core}
+-            onClick={() => onCoreChange(each.core)}
+-            disabled={changingCore !== null || restarting || upgrading}
+-          >
+-            <ListItemText primary={each.name} secondary={`/${each.core}`} />
+-            {changingCore === each.core ? (
+-              <CircularProgress size={20} sx={{ mr: 1 }} />
+-            ) : (
+-              <Chip label={t(each.chipKey)} size="small" />
+-            )}
+-          </ListItemButton>
+-        ))}
++        <ListItem>
++          <ListItemText primary="Mihomo Personal" secondary="/verge-mihomo" />
++          <Chip
++            label={t('settings.modals.clashCore.variants.release')}
++            size="small"
++          />
++        </ListItem>
+       </List>
+     </BaseDialog>
+   )
+diff --git a/src/components/setting/mods/update-viewer.tsx b/src/components/setting/mods/update-viewer.tsx
+index e29c5ba74d6c9897bfbec44aa4db400c5543031f..b683ada606dffbeb93e7c1927dfc0addfaed5240 100644
+--- a/src/components/setting/mods/update-viewer.tsx
++++ b/src/components/setting/mods/update-viewer.tsx
+@@ -328,7 +328,7 @@ export function UpdateViewer({ ref }: { ref?: Ref<DialogRef> }) {
+             sx={{ whiteSpace: 'nowrap' }}
+             onClick={() => {
+               openUrlWithNotice(
+-                `https://github.com/clash-verge-rev/clash-verge-rev/releases/tag/v${updateInfo?.version}`,
++                `https://github.com/Chen017/clash-verge-rev/releases/tag/v${updateInfo?.version}`,
+               )
+             }}
+           >

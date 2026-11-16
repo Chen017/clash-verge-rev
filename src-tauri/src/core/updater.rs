@@ -174,33 +174,25 @@ pub fn is_build_to_stable(current: &str, remote: &str) -> bool {
     !build.is_empty() && !base.contains('-') && base == remote.trim_start_matches('v')
 }
 
-/// Compares numeric version components after stripping version suffixes.
 fn version_lte(a: &str, b: &str) -> bool {
-    let parse = |v: &str| -> Vec<u64> {
-        v.trim_start_matches('v')
-            .split(['-', '+'])
-            .next()
-            .unwrap_or("0")
-            .split('.')
-            .filter_map(|part| part.parse::<u64>().ok())
-            .collect()
-    };
-
-    let a_parts = parse(a);
-    let b_parts = parse(b);
-    let len = a_parts.len().max(b_parts.len());
-
-    for i in 0..len {
-        let av = a_parts.get(i).copied().unwrap_or(0);
-        let bv = b_parts.get(i).copied().unwrap_or(0);
-        if av < bv {
-            return true;
-        }
-        if av > bv {
-            return false;
-        }
+    match (
+        semver::Version::parse(a.trim_start_matches('v')),
+        semver::Version::parse(b.trim_start_matches('v')),
+    ) {
+        (Ok(a), Ok(b)) => a.cmp_precedence(&b).is_le(),
+        _ => true,
     }
-    true // equal
+}
+
+#[cfg(test)]
+mod personal_update_tests {
+    #[test]
+    fn core_only_updates_keep_numeric_prerelease_order() {
+        assert!(!super::version_lte("2.5.10-personal.2", "2.5.10-personal.1"));
+        assert!(!super::version_lte("2.5.10-personal.10", "2.5.10-personal.2"));
+        assert!(super::version_lte("2.5.10-personal.1", "2.5.10-personal.2"));
+        assert!(super::version_lte("2.5.10+abc", "2.5.10+def"));
+    }
 }
 
 /// Maps UI language to one of the three NSIS translations, defaulting to English.
