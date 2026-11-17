@@ -67,7 +67,7 @@ class PreparationTest(unittest.TestCase):
             }
             with (self.subTest(label=label),
                   patch.object(release, 'api', side_effect=lambda path, **_: responses[path]),
-                  patch.object(release, 'run', return_value=f'{revision}\\trefs/tags/{tag}') as git,
+                  patch.object(release, 'run', return_value=f'{revision}\trefs/tags/{tag}') as git,
                   patch.object(release, 'read_url', return_value=manifest.encode()),
                   patch.object(release, 'outputs') as outputs):
                 release.check()
@@ -85,7 +85,7 @@ class PreparationTest(unittest.TestCase):
             f'repos/{release.REPO}/releases/latest': dict(tag_name=TAG, assets=assets),
         }
         with (patch.object(release, 'api', side_effect=lambda path, **_: responses[path]),
-              patch.object(release, 'run', return_value=f'{revision}\\trefs/tags/{tag}'),
+              patch.object(release, 'run', return_value=f'{revision}\trefs/tags/{tag}'),
               patch.object(release, 'read_url', return_value=json.dumps(
                   dict(upstream_tag=tag, upstream_commit=revision, core_tag='outdated',
                        inputs_sha256='outdated')).encode()),
