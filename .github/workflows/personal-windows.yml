@@ -11,6 +11,12 @@ on:
     paths: ['.personal/**', '.github/workflows/personal-windows.yml']
 permissions:
   contents: read
+
+# Serialize the preflight and build together, not just the Windows step.
+concurrency:
+  group: personal-windows-${{ github.event_name == 'pull_request' && github.ref || 'release' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
     if: github.event_name == 'pull_request'
@@ -22,15 +28,29 @@ jobs:
           persist-credentials: false
       - run: python3 -B -m unittest discover -s .personal -p 'test_*.py' -v
       - run: node --check .personal/core.mjs
+  upstream-check:
+    if: github.event_name != 'pull_request' && github.repository == 'Chen017/clash-verge-rev' && github.ref == 'refs/heads/codex/personal-builds'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    outputs:
+      needed: ${{ steps.check.outputs.needed }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check official stable app version without starting Windows
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .personal/release.py check
+
   release:
+    needs: upstream-check
     outputs:
       patch_conflict: ${{ steps.prepare.outputs.patch_conflict }}
-    if: github.event_name != 'pull_request' && github.repository == 'Chen017/clash-verge-rev' && github.ref == 'refs/heads/codex/personal-builds'
+    if: needs.upstream-check.outputs.needed == 'true' && github.event_name != 'pull_request' && github.repository == 'Chen017/clash-verge-rev' && github.ref == 'refs/heads/codex/personal-builds'
     permissions:
       contents: write
-    concurrency:
-      group: personal-windows-release
-      cancel-in-progress: false
     runs-on: windows-latest
     timeout-minutes: 150
     defaults:

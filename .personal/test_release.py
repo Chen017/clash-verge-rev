@@ -45,47 +45,53 @@ PAYLOADS = (INSTALLER, f'{INSTALLER}.sig', 'update.json', 'manifest.json', 'SHA2
 
 
 class PreparationTest(unittest.TestCase):
-    def test_noop_requires_a_complete_release_and_matching_manifest(self):
+    def test_check_starts_windows_only_for_a_new_stable_app(self):
         revision = 'a' * 40
         checksum = 'ab' * 32
-        core_tag = 'v1.19.33'
-        archive = f'mihomo-windows-amd64-{core_tag}.zip'
-        identity = dict(upstream_commit=revision, core_tag=core_tag, core_sha256=checksum,
-                        inputs_sha256=release.maintenance_digest())
+        tag = 'v2.5.10'
         assets = [dict(name=name, state='uploaded', size=1, digest=f'sha256:{checksum}', browser_download_url=name)
                   for name in PAYLOADS]
+        unchanged = dict(upstream_tag=tag, upstream_commit=revision,
+                         core_tag='v1.19.32', core_sha256='old', inputs_sha256='old')
         scenarios = (
-            ('complete', assets, json.dumps(identity), True),
-            ('missing updater', [a for a in assets if a['name'] != 'update.json'], json.dumps(identity), False),
-            ('missing digest', [dict(a, digest=None) if a['name'] == INSTALLER else a for a in assets],
-             json.dumps(identity), False),
-            ('unreadable manifest', assets, 'not JSON', False),
+            ('unchanged app and changed core', assets, json.dumps(unchanged), False),
+            ('changed maintenance inputs', assets, json.dumps(dict(unchanged, inputs_sha256='new')), False),
+            ('new upstream app', assets, json.dumps(dict(unchanged, upstream_tag='v2.5.9')), True),
+            ('incomplete release', assets[1:], json.dumps(unchanged), True),
+            ('broken manifest', assets, 'not JSON', True),
         )
-        for label, published_assets, manifest, unchanged in scenarios:
+        for label, published_assets, manifest, needed in scenarios:
             responses = {
-                f'repos/{release.UPSTREAM}/releases/latest': dict(tag_name='v2.5.10', draft=False, prerelease=False),
-                f'repos/{release.CORE}/releases/latest': dict(tag_name=core_tag, draft=False, prerelease=False, assets=[
-                    dict(name=archive, browser_download_url=archive, digest=f'sha256:{checksum}'),
-                    dict(name='checksums.txt', browser_download_url='checksums.txt'),
-                ]),
+                f'repos/{release.UPSTREAM}/releases/latest': dict(tag_name=tag, draft=False, prerelease=False),
                 f'repos/{release.REPO}/releases/latest': dict(tag_name=TAG, assets=published_assets),
             }
-            downloads = {'manifest.json': manifest.encode(), 'checksums.txt': f'{checksum}  {archive}\n'.encode()}
-            with (self.subTest(label=label), tempfile.TemporaryDirectory() as directory,
-                  patch.object(release, 'WORK', Path(directory)), patch.object(release, 'SOURCE', Path(directory)),
+            with (self.subTest(label=label),
                   patch.object(release, 'api', side_effect=lambda path, **_: responses[path]),
-                  patch.object(release, 'run', return_value=f'{revision}\trefs/tags/v2.5.10') as git,
-                  patch.object(release, 'read_url', side_effect=downloads.__getitem__),
+                  patch.object(release, 'run', return_value=f'{revision}\\trefs/tags/{tag}') as git,
+                  patch.object(release, 'read_url', return_value=manifest.encode()),
                   patch.object(release, 'outputs') as outputs):
-                if unchanged:
-                    release.prepare()
-                    outputs.assert_called_once_with(needed=False)
-                else:
-                    with self.assertRaisesRegex(RuntimeError, 'Expected a fresh checkout'):
-                        release.prepare()
-                    outputs.assert_not_called()
+                release.check()
+                outputs.assert_called_once_with(needed=needed)
                 git.assert_called_once()
-                self.assertEqual(git.call_args.args[:2], ('git', 'ls-remote'))
+
+    def test_prepare_skips_all_core_metadata_when_upstream_app_is_unchanged(self):
+        revision = 'a' * 40
+        tag = 'v2.5.10'
+        checksum = 'ab' * 32
+        assets = [dict(name=name, state='uploaded', size=1, digest=f'sha256:{checksum}', browser_download_url=name)
+                  for name in PAYLOADS]
+        responses = {
+            f'repos/{release.UPSTREAM}/releases/latest': dict(tag_name=tag, draft=False, prerelease=False),
+            f'repos/{release.REPO}/releases/latest': dict(tag_name=TAG, assets=assets),
+        }
+        with (patch.object(release, 'api', side_effect=lambda path, **_: responses[path]),
+              patch.object(release, 'run', return_value=f'{revision}\\trefs/tags/{tag}'),
+              patch.object(release, 'read_url', return_value=json.dumps(
+                  dict(upstream_tag=tag, upstream_commit=revision, core_tag='outdated',
+                       inputs_sha256='outdated')).encode()),
+              patch.object(release, 'outputs') as outputs):
+            release.prepare()
+            outputs.assert_called_once_with(needed=False)
 
 
 class PublicationTest(unittest.TestCase):

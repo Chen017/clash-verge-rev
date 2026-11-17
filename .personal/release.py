@@ -111,14 +111,46 @@ def maintenance_digest():
     return digest.hexdigest()
 
 
-def prepare():
-    WORK.mkdir(parents=True, exist_ok=True)
+def app_release_state():
+    """Read only stable app metadata and the last published manifest (no core download)."""
     upstream = api(f'repos/{UPSTREAM}/releases/latest')
     tag = upstream['tag_name']
     if upstream['draft'] or upstream['prerelease'] or not re.fullmatch(r'v\d+\.\d+\.\d+', tag):
         raise RuntimeError('Expected an official stable app release')
     upstream_repository = f'https://github.com/{UPSTREAM}.git'
     revision = upstream_revision(upstream_repository, tag)
+    previous = api(f'repos/{REPO}/releases/latest', missing=True)
+    last = None
+    if previous and release_assets_complete(previous['tag_name'], previous['assets']):
+        raw_manifest = read_url(next(a['browser_download_url'] for a in previous['assets'] if a['name'] == 'manifest.json'))
+        try:
+            last = json.loads(raw_manifest)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+    return tag, revision, last
+
+
+def needs_app_update(tag, revision, last):
+    """Core and maintenance changes alone never schedule an application rebuild."""
+    return not isinstance(last, dict) or (last.get('upstream_tag'), last.get('upstream_commit')) != (tag, revision)
+
+
+def check():
+    tag, revision, last = app_release_state()
+    needed = needs_app_update(tag, revision, last)
+    outputs(needed=needed)
+    print(f'Upstream app {tag} ({revision[:12]}): ' +
+          ('new stable app release; Windows build required.' if needed else
+           'already published; skipping Windows runner even if the personal core changed.'))
+
+
+def prepare():
+    WORK.mkdir(parents=True, exist_ok=True)
+    tag, revision, last = app_release_state()
+    if not needs_app_update(tag, revision, last):
+        outputs(needed=False)
+        print('Stable upstream app unchanged; core-only and maintenance-only updates are deferred.')
+        return
     core = api(f'repos/{CORE}/releases/latest')
     if core['draft'] or core['prerelease']:
         raise RuntimeError('Expected a published personal core')
@@ -130,17 +162,6 @@ def prepare():
         raise RuntimeError('Core release checksum differs from GitHub asset digest')
     identity = dict(upstream_commit=revision, core_tag=core['tag_name'], core_sha256=checksum,
                     inputs_sha256=maintenance_digest())
-    previous = api(f'repos/{REPO}/releases/latest', missing=True)
-    if previous and release_assets_complete(previous['tag_name'], previous['assets']):
-        raw_manifest = read_url(next(a['browser_download_url'] for a in previous['assets'] if a['name'] == 'manifest.json'))
-        try:
-            last = json.loads(raw_manifest)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            last = None
-        if isinstance(last, dict) and all(last.get(key) == value for key, value in identity.items()):
-            outputs(needed=False)
-            print('Stable app, personal core and maintenance inputs unchanged; no rebuild required.')
-            return
     if SOURCE.exists():
         raise RuntimeError('Expected a fresh checkout; existing build source is preserved')
     number = next_build(api(f'repos/{REPO}/git/matching-refs/tags/v'))
@@ -273,5 +294,5 @@ def publish():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['prepare', 'package', 'publish'])
+    parser.add_argument('command', choices=['check', 'prepare', 'package', 'publish'])
     globals()[parser.parse_args().command]()
