@@ -9,12 +9,27 @@ import release
 
 
 class ReleaseRetryTest(unittest.TestCase):
-    def test_failed_publication_does_not_reuse_an_existing_version(self):
-        refs = [{'ref': 'refs/tags/v2.5.10-personal.9'},
-                {'ref': 'refs/tags/v2.5.11-personal.10'},
-                {'ref': 'refs/tags/v2.5.11'}]
-        self.assertEqual(release.next_build(refs), 11)
-        self.assertEqual(release.next_build([]), 1)
+    def test_next_version_uses_clean_personal_and_increments_only_same_upstream(self):
+        self.assertEqual(release.next_version('v2.5.10', []), ('2.5.10-personal', 1))
+        refs = [{'ref': 'refs/tags/v2.5.10-personal'}]
+        self.assertEqual(release.next_version('v2.5.10', refs), ('2.5.10-personal.2', 2))
+        refs.append({'ref': 'refs/tags/v2.5.10-personal.2'})
+        self.assertEqual(release.next_version('v2.5.10', refs), ('2.5.10-personal.3', 3))
+        self.assertEqual(release.next_version('v2.5.11', refs), ('2.5.11-personal', 1))
+
+    def test_extract_changelog_section_and_format_notes(self):
+        changelog = '## v2.5.11\n- Added X\n---\n## v2.5.10\n- Fixed Y\n---\n'
+        self.assertEqual(release.extract_changelog_section(changelog, 'v2.5.10'), '- Fixed Y')
+        plan = dict(tag='v2.5.10-personal', version='2.5.10-personal', upstream_tag='v2.5.10',
+                    core_tag='v1.19.33-personal', upstream_notes='## Changes\n- Upstream fix')
+        updater_notes = release.format_release_notes(plan, for_updater=True)
+        self.assertTrue(updater_notes.startswith('## Changes\n- Upstream fix'))
+        self.assertIn('\n\n---\n\n### Personal Customizations\n', updater_notes)
+        self.assertIn('**[See More](https://github.com/Chen017/clash-verge-rev/releases/tag/v2.5.10-personal)**', updater_notes)
+        release_notes = release.format_release_notes(plan, for_updater=False)
+        self.assertTrue(release_notes.startswith('## Changes\n- Upstream fix'))
+        self.assertIn('### Personal Customizations', release_notes)
+        self.assertIn('Maintenance and migration', release_notes)
 
     def test_upstream_revision_peels_annotated_tag(self):
         revision = 'a' * 40
@@ -38,7 +53,7 @@ class ReleaseRetryTest(unittest.TestCase):
                 release.core_archive_checksum(invalid, name)
 
 
-VERSION = '2.5.10-personal.11'
+VERSION = '2.5.10-personal'
 TAG = f'v{VERSION}'
 INSTALLER = f'Clash.Verge_{VERSION}_x64-setup.exe'
 PAYLOADS = (INSTALLER, f'{INSTALLER}.sig', 'update.json', 'manifest.json', 'SHA256SUMS')
@@ -96,7 +111,8 @@ class PreparationTest(unittest.TestCase):
 
 class PublicationTest(unittest.TestCase):
     def test_package_uses_the_same_canonical_filename_in_the_updater_feed(self):
-        plan = dict(tag=TAG, version=VERSION, upstream_tag='v2.5.10', core_tag='v1.19.33')
+        plan = dict(tag=TAG, version=VERSION, upstream_tag='v2.5.10', core_tag='v1.19.33-personal',
+                    upstream_notes='## Upstream\n- Feature 1')
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / 'source'
@@ -121,6 +137,8 @@ class PublicationTest(unittest.TestCase):
             self.assertEqual({path.name for path in dist.iterdir()}, set(PAYLOADS))
             update = json.loads((dist / 'update.json').read_text(encoding='utf-8'))
             self.assertEqual(update['version'], VERSION)
+            self.assertTrue(update['notes'].startswith('## Upstream\n- Feature 1'))
+            self.assertIn('### Personal Customizations', update['notes'])
             for platform in ('windows-x86_64', 'windows-x86_64-nsis'):
                 self.assertTrue(update['platforms'][platform]['url'].endswith(f'/{TAG}/{INSTALLER}'))
                 self.assertEqual(update['platforms'][platform]['signature'], 'signature')

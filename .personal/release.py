@@ -56,9 +56,62 @@ def outputs(**values):
                 stream.write(f'{key}={str(value).lower() if isinstance(value, bool) else value}\n')
 
 
-def next_build(refs):
-    return max([0, *[int(match[1]) for ref in refs
-                    if (match := re.fullmatch(r'refs/tags/v\d+\.\d+\.\d+-personal\.(\d+)', ref['ref']))]]) + 1
+def next_version(upstream_tag, refs):
+    base = f'{upstream_tag.removeprefix("v")}-personal'
+    numbers = []
+    for ref in refs:
+        name = ref['ref']
+        if name == f'refs/tags/v{base}':
+            numbers.append(1)
+        elif match := re.fullmatch(rf'refs/tags/v{re.escape(base)}\.(\d+)', name):
+            numbers.append(int(match[1]))
+    if not numbers:
+        return base, 1
+    nxt = max(numbers) + 1
+    return f'{base}.{nxt}', nxt
+
+
+def extract_changelog_section(changelog_text, tag):
+    capturing = False
+    lines = []
+    for line in changelog_text.splitlines():
+        if re.match(r'^##\s+v[\d.]+', line):
+            if capturing:
+                break
+            if line.strip() == f'## {tag}':
+                capturing = True
+            continue
+        if capturing:
+            if line.strip().startswith('---'):
+                break
+            lines.append(line)
+    return '\n'.join(lines).strip()
+
+
+def format_release_notes(plan, *, for_updater=False):
+    upstream_notes = (plan.get('upstream_notes') or '').strip()
+    custom_lines = [
+        '### Personal Customizations',
+        '',
+        f'- Unofficial Windows amd64 personal build based on upstream `{plan["upstream_tag"]}`',
+        f'- Bundled personal Mihomo core: `{plan["core_tag"]}` (XHTTP H2 window, independent download dialers, scoped provider chaining, 0-RTT ticket recovery, unified-delay warm fallback)',
+        f'- Signed in-app updates via `{REPO}`; existing configuration directory is preserved',
+    ]
+    if for_updater:
+        custom_lines.extend([
+            '',
+            f'**[See More](https://github.com/{REPO}/releases/tag/{plan["tag"]})**',
+        ])
+    else:
+        custom_lines.extend([
+            '',
+            f'[Maintenance and migration](https://github.com/{REPO}/blob/codex/personal-builds/.personal/README.md). '
+            'Update signatures and SHA256SUMS were verified before publication.',
+        ])
+    custom = '\n'.join(custom_lines) + '\n'
+    if upstream_notes:
+        return f'{upstream_notes}\n\n---\n\n{custom}'
+    return custom
 
 
 def upstream_revision(repository, tag):
@@ -101,14 +154,18 @@ def release_assets_complete(tag, assets):
     )
 
 
-def maintenance_digest():
-    files = sorted(ROOT / name for name in (
-        '.personal/app.patch', '.personal/core.mjs', '.personal/release.py', '.github/workflows/personal-windows.yml',
-    ))
+def files_digest(names):
+    files = sorted(ROOT / name for name in names)
     digest = hashlib.sha256()
     for path in files:
         digest.update(path.relative_to(ROOT).as_posix().encode() + b'\0' + path.read_bytes())
     return digest.hexdigest()
+
+
+def maintenance_digest():
+    return files_digest((
+        '.personal/app.patch', '.personal/core.mjs', '.personal/release.py', '.github/workflows/personal-windows.yml',
+    ))
 
 
 def app_release_state():
@@ -127,7 +184,7 @@ def app_release_state():
             last = json.loads(raw_manifest)
         except (json.JSONDecodeError, UnicodeDecodeError):
             pass
-    return tag, revision, last
+    return tag, revision, last, (upstream.get('body') or '').strip()
 
 
 def needs_app_update(tag, revision, last):
@@ -136,7 +193,7 @@ def needs_app_update(tag, revision, last):
 
 
 def check():
-    tag, revision, last = app_release_state()
+    tag, revision, last, _ = app_release_state()
     needed = needs_app_update(tag, revision, last)
     outputs(needed=needed)
     print(f'Upstream app {tag} ({revision[:12]}): ' +
@@ -146,11 +203,12 @@ def check():
 
 def prepare():
     WORK.mkdir(parents=True, exist_ok=True)
-    tag, revision, last = app_release_state()
+    tag, revision, last, upstream_body = app_release_state()
     if not needs_app_update(tag, revision, last):
         outputs(needed=False)
         print('Stable upstream app unchanged; core-only and maintenance-only updates are deferred.')
         return
+    upstream_repository = f'https://github.com/{UPSTREAM}.git'
     core = api(f'repos/{CORE}/releases/latest')
     if core['draft'] or core['prerelease']:
         raise RuntimeError('Expected a published personal core')
@@ -164,7 +222,8 @@ def prepare():
                     inputs_sha256=maintenance_digest())
     if SOURCE.exists():
         raise RuntimeError('Expected a fresh checkout; existing build source is preserved')
-    number = next_build(api(f'repos/{REPO}/git/matching-refs/tags/v'))
+    refs = api(f'repos/{REPO}/git/matching-refs/tags/v{tag[1:]}-personal', missing=True) or []
+    version, number = next_version(tag, refs)
     lock = dict(tag=core['tag_name'], url=asset['browser_download_url'], sha256=checksum,
                 provenance=json.loads(read_url(next(a['browser_download_url'] for a in core['assets'] if a['name'] == 'provenance.json'))))
     maintenance_commit = run('git', 'rev-parse', 'HEAD', capture=True)
@@ -186,7 +245,6 @@ def prepare():
             raise
     shutil.copytree(ROOT / '.personal', SOURCE / '.personal', ignore=shutil.ignore_patterns('work', 'dist', '__pycache__'))
     write_json(SOURCE / '.personal/core-lock.json', lock)
-    version = f'{tag[1:]}-personal.{number}'
     for name in ['package.json', 'src-tauri/tauri.conf.json']:
         path = SOURCE / name
         content = path.read_text(encoding='utf-8')
@@ -194,11 +252,14 @@ def prepare():
     path = SOURCE / 'src-tauri/Cargo.toml'
     content = path.read_text(encoding='utf-8')
     path.write_text(re.sub(r'^version = "[^"]+"', f'version = "{version}"', content, count=1, flags=re.M), encoding='utf-8')
+    upstream_notes = upstream_body
+    if not upstream_notes and (SOURCE / 'Changelog.md').is_file():
+        upstream_notes = extract_changelog_section((SOURCE / 'Changelog.md').read_text(encoding='utf-8'), tag)
     toolchain = tomllib.loads((SOURCE / 'rust-toolchain.toml').read_text(encoding='utf-8'))['toolchain']['channel']
     versions = dict(line.split() for line in (SOURCE / '.tool-versions').read_text(encoding='utf-8').splitlines() if line.strip())
     node = versions['nodejs']
     plan = dict(**identity, version=version, tag=f'v{version}', build_number=number,
-                upstream_tag=tag, upstream_repository=UPSTREAM, core=lock,
+                upstream_tag=tag, upstream_repository=UPSTREAM, upstream_notes=upstream_notes, core=lock,
                 maintenance_commit=maintenance_commit, rust_version=toolchain, node_version=node)
     write_json(WORK / 'plan.json', plan)
     outputs(needed=True, rust=toolchain, node=node)
@@ -232,7 +293,7 @@ def package():
     verify_signature(installer, signature, config['plugins']['updater']['pubkey'], plan['version'])
     url = f'https://github.com/{REPO}/releases/download/{plan["tag"]}/{installer.name}'
     platform = dict(url=url, signature=signature.read_text(encoding='ascii').strip())
-    write_json(DIST / 'update.json', dict(version=plan['version'], notes=f'Stable {plan["upstream_tag"]}; personal split-route core {plan["core_tag"]}.',
+    write_json(DIST / 'update.json', dict(version=plan['version'], notes=format_release_notes(plan, for_updater=True),
                pub_date=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
                platforms={'windows-x86_64': platform, 'windows-x86_64-nsis': platform}))
     write_json(DIST / 'manifest.json', plan)
@@ -276,11 +337,7 @@ def publish():
         raise RuntimeError('Local release assets are incomplete or unexpected')
     run('git', 'push', 'origin', f'{plan["source_commit"]}:refs/tags/{tag}')
     notes = WORK / 'notes.md'
-    notes.write_text(f'Unofficial Windows amd64 personal build, based on upstream {plan["upstream_tag"]}.\n\n'
-                     f'Bundled Mihomo: {plan["core_tag"]}. Install this package once, then use the ordinary in-app updater. '
-                     'The existing configuration directory is preserved.\n\n'
-                     f'[Maintenance and migration](https://github.com/{REPO}/blob/codex/personal-builds/.personal/README.md). '
-                     'Update signatures and SHA256SUMS were verified before publication.\n', encoding='utf-8')
+    notes.write_text(format_release_notes(plan, for_updater=False), encoding='utf-8')
     run('gh', 'release', 'create', tag, '--repo', REPO, '--verify-tag', '--draft', '--title', tag, '--notes-file', str(notes),
         *map(str, sorted(DIST.iterdir())))
     draft = json.loads(run('gh', 'release', 'view', tag, '--repo', REPO, '--json', 'assets,isDraft', capture=True))
